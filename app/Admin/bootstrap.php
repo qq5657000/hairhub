@@ -53,6 +53,20 @@ Admin::menu(function (\Dcat\Admin\Layout\Menu $menu) {
             'icon'      => 'feather icon-layers',
             'uri'       => '/openapi-docs',
             'parent_id' => 0,
-        ]
+        ],
+        [
+            'id'        => 5,
+            'title'     => '发型中心',
+            'icon'      => 'feather icon-scissors',
+            'uri'       => '',
+            'parent_id' => 0,
+        ],
+        [
+            'id'        => 6,
+            'title'     => '发型分类',
+            'icon'      => 'feather icon-folder',
+            'uri'       => 'hairstyle-categories',
+            'parent_id' => 5,
+        ],
 ]);
 });

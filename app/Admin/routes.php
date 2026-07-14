@@ -15,6 +15,9 @@ Route::group([
     $router->get('/', 'HomeController@index');
     $router->resource('/member-user',MemberUserController::class);
 
+    # 发型中心
+    $router->resource('/hairstyle-categories', HairstyleCategoryController::class);
+
     # 开放接口
     $router->get('openapi-docs', 'OpenApiDocsController@index');
 

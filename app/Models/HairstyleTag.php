@@ -27,11 +27,21 @@ class HairstyleTag extends Model
         'updated_at' => 'datetime',
     ];
 
+    /**
+     * 该标签的发型关联记录（hairstyle_tag_relations）.
+     *
+     * @return HasMany
+     */
     public function tagRelations(): HasMany
     {
         return $this->hasMany(HairstyleTagRelation::class, 'tag_id');
     }
 
+    /**
+     * 使用该标签的发型（多对多，中间表 hairstyle_tag_relations，仅有 created_at）.
+     *
+     * @return BelongsToMany
+     */
     public function hairstyles(): BelongsToMany
     {
         return $this->belongsToMany(

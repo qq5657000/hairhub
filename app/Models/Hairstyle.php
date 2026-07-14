@@ -62,16 +62,32 @@ class Hairstyle extends Model
         'deleted_at' => 'datetime',
     ];
 
+    /**
+     * 所属主分类.
+     *
+     * @return BelongsTo
+     */
     public function category(): BelongsTo
     {
         return $this->belongsTo(HairstyleCategory::class, 'category_id');
     }
 
+    /**
+     * 封面媒体（与 hairstyle_media.is_primary 无数据库强制同步关系，
+     * 由业务/Service 层事务负责保持一致，Model 层不做自动同步）.
+     *
+     * @return BelongsTo
+     */
     public function coverMedia(): BelongsTo
     {
         return $this->belongsTo(MediaFile::class, 'cover_media_id');
     }
 
+    /**
+     * 发型关联的标签（多对多，中间表 hairstyle_tag_relations，仅有 created_at）.
+     *
+     * @return BelongsToMany
+     */
     public function tags(): BelongsToMany
     {
         return $this->belongsToMany(
@@ -82,16 +98,31 @@ class Hairstyle extends Model
         )->withPivot('created_at');
     }
 
+    /**
+     * 发型标签关联记录（hairstyle_tag_relations）.
+     *
+     * @return HasMany
+     */
     public function tagRelations(): HasMany
     {
         return $this->hasMany(HairstyleTagRelation::class, 'hairstyle_id');
     }
 
+    /**
+     * 发型的媒体关联记录（hairstyle_media，包含图片类型/排序/是否主图等信息）.
+     *
+     * @return HasMany
+     */
     public function mediaRelations(): HasMany
     {
         return $this->hasMany(HairstyleMedia::class, 'hairstyle_id');
     }
 
+    /**
+     * 发型关联的媒体文件（多对多，中间表 hairstyle_media，含 created_at/updated_at）.
+     *
+     * @return BelongsToMany
+     */
     public function mediaFiles(): BelongsToMany
     {
         return $this->belongsToMany(
@@ -110,6 +141,12 @@ class Hairstyle extends Model
         ])->withTimestamps();
     }
 
+    /**
+     * 发型的主图关联记录（is_primary = 1），仅用于读取展示，
+     * 不在关系中自动同步 cover_media_id，主图切换需由 Service 层事务处理。
+     *
+     * @return HasOne
+     */
     public function primaryMediaRelation(): HasOne
     {
         return $this->hasOne(HairstyleMedia::class, 'hairstyle_id')->where('is_primary', 1);

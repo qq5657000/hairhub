@@ -51,11 +51,21 @@ class MediaFile extends Model
         'updated_at' => 'datetime',
     ];
 
+    /**
+     * 该媒体被哪些发型引用（对应 hairstyle_media 关联记录）.
+     *
+     * @return HasMany
+     */
     public function hairstyleMediaRelations(): HasMany
     {
         return $this->hasMany(HairstyleMedia::class, 'media_id');
     }
 
+    /**
+     * 该媒体所关联的发型（多对多，中间表 hairstyle_media）.
+     *
+     * @return BelongsToMany
+     */
     public function hairstyles(): BelongsToMany
     {
         return $this->belongsToMany(

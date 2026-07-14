@@ -8,9 +8,10 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 class HairstyleTagRelation extends Model
 {
     /**
-     * 表中只有 created_at，没有 updated_at。
+     * hairstyle_tag_relations 表只有 created_at 字段，没有 updated_at，
+     * 显式关闭 updated_at 自动维护；created_at 仍由 Eloquent 自动写入。
      */
-    const UPDATED_AT = null;
+    public const UPDATED_AT = null;
 
     protected $table = 'hairstyle_tag_relations';
 
@@ -25,11 +26,21 @@ class HairstyleTagRelation extends Model
         'created_at' => 'datetime',
     ];
 
+    /**
+     * 关联的发型.
+     *
+     * @return BelongsTo
+     */
     public function hairstyle(): BelongsTo
     {
         return $this->belongsTo(Hairstyle::class, 'hairstyle_id');
     }
 
+    /**
+     * 关联的标签.
+     *
+     * @return BelongsTo
+     */
     public function tag(): BelongsTo
     {
         return $this->belongsTo(HairstyleTag::class, 'tag_id');

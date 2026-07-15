@@ -62,6 +62,13 @@ Admin::menu(function (\Dcat\Admin\Layout\Menu $menu) {
             'parent_id' => 0,
         ],
         [
+            'id'        => 10,
+            'title'     => '发型管理',
+            'icon'      => 'feather icon-scissors',
+            'uri'       => 'hairstyles',
+            'parent_id' => 5,
+        ],
+        [
             'id'        => 6,
             'title'     => '发型分类',
             'icon'      => 'feather icon-folder',

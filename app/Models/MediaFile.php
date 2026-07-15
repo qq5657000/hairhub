@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Facades\Storage;
 
 class MediaFile extends Model
 {
@@ -82,5 +83,45 @@ class MediaFile extends Model
             'status',
             'sort',
         ])->withTimestamps();
+    }
+
+    /**
+     * 访问地址优先根据 storage + path 动态生成，数据库 url 字段只作为动态生成失败时的缓存兜底
+     * （对应 doc/v1.0/database/05-媒体资源模块.md 6.4）。
+     */
+    public function getUrlAttribute($value): string
+    {
+        $dynamic = $this->buildStorageUrl($this->attributes['path'] ?? '');
+
+        return $dynamic !== '' ? $dynamic : (string) $value;
+    }
+
+    /**
+     * 缩略图访问地址同样优先动态生成，没有缩略图时返回空字符串。
+     */
+    public function getThumbnailUrlAttribute($value): string
+    {
+        $thumbnailPath = $this->attributes['thumbnail_path'] ?? '';
+
+        if ($thumbnailPath === '') {
+            return '';
+        }
+
+        $dynamic = $this->buildStorageUrl($thumbnailPath);
+
+        return $dynamic !== '' ? $dynamic : (string) $value;
+    }
+
+    private function buildStorageUrl(string $path): string
+    {
+        if ($path === '') {
+            return '';
+        }
+
+        try {
+            return Storage::disk($this->attributes['storage'] ?? 'public')->url($path);
+        } catch (\Throwable $e) {
+            return '';
+        }
     }
 }

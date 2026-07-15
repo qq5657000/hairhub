@@ -75,5 +75,19 @@ Admin::menu(function (\Dcat\Admin\Layout\Menu $menu) {
             'uri'       => 'hairstyle-tags',
             'parent_id' => 5,
         ],
+        [
+            'id'        => 8,
+            'title'     => '媒体中心',
+            'icon'      => 'feather icon-image',
+            'uri'       => '',
+            'parent_id' => 0,
+        ],
+        [
+            'id'        => 9,
+            'title'     => '媒体资源',
+            'icon'      => 'feather icon-image',
+            'uri'       => 'media-files',
+            'parent_id' => 8,
+        ],
 ]);
 });

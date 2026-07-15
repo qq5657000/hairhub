@@ -19,6 +19,9 @@ Route::group([
     $router->resource('/hairstyle-categories', HairstyleCategoryController::class);
     $router->resource('/hairstyle-tags', HairstyleTagController::class);
 
+    # 媒体中心
+    $router->resource('/media-files', MediaFileController::class);
+
     # 开放接口
     $router->get('openapi-docs', 'OpenApiDocsController@index');
 

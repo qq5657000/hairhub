@@ -68,5 +68,12 @@ Admin::menu(function (\Dcat\Admin\Layout\Menu $menu) {
             'uri'       => 'hairstyle-categories',
             'parent_id' => 5,
         ],
+        [
+            'id'        => 7,
+            'title'     => '发型标签',
+            'icon'      => 'feather icon-tag',
+            'uri'       => 'hairstyle-tags',
+            'parent_id' => 5,
+        ],
 ]);
 });

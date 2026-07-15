@@ -17,6 +17,7 @@ Route::group([
 
     # 发型中心
     $router->resource('/hairstyle-categories', HairstyleCategoryController::class);
+    $router->resource('/hairstyle-tags', HairstyleTagController::class);
 
     # 开放接口
     $router->get('openapi-docs', 'OpenApiDocsController@index');

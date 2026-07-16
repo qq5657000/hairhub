@@ -7,7 +7,6 @@ use App\Enums\Media\MediaFileType;
 use App\Enums\Media\MediaStatus;
 use App\Models\MediaFile;
 use Illuminate\Foundation\Testing\RefreshDatabase;
-use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\ValidationException;
 use Tests\TestCase;
 
@@ -16,17 +15,17 @@ use Tests\TestCase;
  * - decideCoverAction()：纯决策函数，覆盖“上传 > 库内选择 > 清除 > 保留原值”优先级；
  * - resolveCoverMediaId()：结合实际媒体校验（图片类型 / 启用状态）得到最终 cover_media_id。
  *
+ * 注意：cover_upload 现在的值语义已经从"磁盘路径字符串"改为"uploadCover() 接口
+ * 已经正式创建的 media_files.id"（见"上传新封面后提交出现重复媒体记录"修复），
+ * 因此 decideCoverAction()/resolveCoverMediaId() 的第一个参数是 int，upload 分支
+ * 与 select 分支现在都只是校验一个已存在的媒体 ID，不会再触发 MediaFile::create()。
+ *
  * 不经过 Dcat 的 HTTP 路由和后台登录态（与现有 HairstyleControllerTest 保持一致的测试策略），
  * Grid/Form 的可用性通过手工在后台操作验证（见开发总结）。
  */
 class HairstyleCategoryControllerTest extends TestCase
 {
     use RefreshDatabase;
-
-    /**
-     * 1x1 透明 PNG，用于模拟已经落盘的封面上传文件。
-     */
-    private const FAKE_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
 
     private HairstyleCategoryController $controller;
 
@@ -49,28 +48,28 @@ class HairstyleCategoryControllerTest extends TestCase
 
     public function test_decide_cover_action_prefers_upload_over_everything(): void
     {
-        $decision = HairstyleCategoryController::decideCoverAction('media/upload.png', 5, true, 9);
+        $decision = HairstyleCategoryController::decideCoverAction(3, 5, true, 9);
 
-        $this->assertSame('upload', $decision['action']);
+        $this->assertSame(['action' => 'upload', 'media_id' => 3], $decision);
     }
 
     public function test_decide_cover_action_prefers_select_when_no_upload(): void
     {
-        $decision = HairstyleCategoryController::decideCoverAction('', 5, true, 9);
+        $decision = HairstyleCategoryController::decideCoverAction(0, 5, true, 9);
 
         $this->assertSame(['action' => 'select', 'media_id' => 5], $decision);
     }
 
     public function test_decide_cover_action_clears_when_only_clear_flag_set(): void
     {
-        $decision = HairstyleCategoryController::decideCoverAction('', 0, true, 9);
+        $decision = HairstyleCategoryController::decideCoverAction(0, 0, true, 9);
 
         $this->assertSame(['action' => 'clear', 'media_id' => 0], $decision);
     }
 
     public function test_decide_cover_action_keeps_original_when_nothing_changed(): void
     {
-        $decision = HairstyleCategoryController::decideCoverAction('', 0, false, 9);
+        $decision = HairstyleCategoryController::decideCoverAction(0, 0, false, 9);
 
         $this->assertSame(['action' => 'keep', 'media_id' => 9], $decision);
     }
@@ -79,7 +78,7 @@ class HairstyleCategoryControllerTest extends TestCase
     {
         $media = $this->makeMedia();
 
-        $mediaId = $this->controller->resolveCoverMediaId('', $media->id, false, 0);
+        $mediaId = $this->controller->resolveCoverMediaId(0, $media->id, false, 0);
 
         $this->assertSame($media->id, $mediaId);
     }
@@ -90,7 +89,7 @@ class HairstyleCategoryControllerTest extends TestCase
 
         $this->expectException(ValidationException::class);
 
-        $this->controller->resolveCoverMediaId('', $video->id, false, 0);
+        $this->controller->resolveCoverMediaId(0, $video->id, false, 0);
     }
 
     public function test_resolve_cover_media_id_rejects_disabled_media(): void
@@ -99,50 +98,44 @@ class HairstyleCategoryControllerTest extends TestCase
 
         $this->expectException(ValidationException::class);
 
-        $this->controller->resolveCoverMediaId('', $disabled->id, false, 0);
+        $this->controller->resolveCoverMediaId(0, $disabled->id, false, 0);
     }
 
     public function test_resolve_cover_media_id_rejects_missing_media(): void
     {
         $this->expectException(ValidationException::class);
 
-        $this->controller->resolveCoverMediaId('', 999999, false, 0);
+        $this->controller->resolveCoverMediaId(0, 999999, false, 0);
     }
 
     public function test_resolve_cover_media_id_clears_to_zero(): void
     {
-        $mediaId = $this->controller->resolveCoverMediaId('', 0, true, 9);
+        $mediaId = $this->controller->resolveCoverMediaId(0, 0, true, 9);
 
         $this->assertSame(0, $mediaId);
     }
 
     public function test_resolve_cover_media_id_keeps_original_value_when_untouched(): void
     {
-        $mediaId = $this->controller->resolveCoverMediaId('', 0, false, 9);
+        $mediaId = $this->controller->resolveCoverMediaId(0, 0, false, 9);
 
         $this->assertSame(9, $mediaId);
     }
 
     /**
-     * 上传新文件时，会登记为一条新的 media_files 记录并返回其 ID，即使同时传入了
-     * 库内选择的媒体 ID 或清除标记，也仍然以上传的文件优先（覆盖率对应“新上传图片优先”规则）。
+     * upload 分支现在只是"引用一个已存在的 media_files.id"，即使同时传入了库内选择的
+     * 媒体 ID 或清除标记，也仍然以上传的媒体优先（覆盖率对应"新上传图片优先"规则），
+     * 且过程中绝不会新增任何 media_files 记录。
      */
-    public function test_resolve_cover_media_id_registers_new_media_file_on_upload(): void
+    public function test_resolve_cover_media_id_prefers_upload_media_and_creates_no_new_record(): void
     {
-        Storage::fake('public');
-
-        $path = 'media/'.now()->format('Y/m/d').'/'.uniqid().'.png';
-        Storage::disk('public')->put($path, base64_decode(self::FAKE_PNG_BASE64));
-
+        $uploadedMedia = $this->makeMedia();
         $existingMedia = $this->makeMedia();
 
-        $mediaId = $this->controller->resolveCoverMediaId($path, $existingMedia->id, true, 9);
+        $mediaId = $this->controller->resolveCoverMediaId($uploadedMedia->id, $existingMedia->id, true, 9);
 
+        $this->assertSame($uploadedMedia->id, $mediaId);
         $this->assertNotSame($existingMedia->id, $mediaId);
-        $this->assertDatabaseHas('media_files', [
-            'id' => $mediaId,
-            'file_type' => MediaFileType::Image->value,
-            'path' => $path,
-        ]);
+        $this->assertSame(2, MediaFile::query()->count());
     }
 }

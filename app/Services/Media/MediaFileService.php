@@ -15,6 +15,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
+use Symfony\Component\HttpFoundation\File\UploadedFile;
 
 /**
  * 媒体资源业务 Service。
@@ -139,6 +140,43 @@ class MediaFileService
     }
 
     /**
+     * 将一个尚未落盘的上传文件（$_FILES / UploadedFile）一次性落盘并登记为 media_files 记录。
+     *
+     * 与 storeUploadedFile() 的区别：storeUploadedFile() 假定文件已经由调用方写入磁盘，
+     * 只负责"登记入库"；本方法额外负责"落盘"这一步，用于替代 Dcat 表单 File/Image 字段
+     * 默认的"异步上传只落盘、提交表单时才登记入库"两阶段流程——该默认流程会导致同一个
+     * disk+path 在"上传"和"提交表单"两个独立请求里被分别处理，一旦表单被重复提交
+     * （例如 Dcat 编辑表单默认的 autoUpdateColumn 上传后台静默更新 + 用户手动点击提交，
+     * 或用户在其他字段校验失败后未重新上传就再次提交），会对同一个 storage+path 重复调用
+     * MediaFile::create()，触发 uk_storage_path 唯一索引冲突，且失败清理逻辑还会误删
+     * 第一次已经成功入库的原文件/缩略图，产生"数据库有记录、物理文件已丢失"的孤儿媒体。
+     *
+     * 采用本方法后，"落盘 + 登记入库"在同一次请求内一次性完成，之后的业务表单提交只需要
+     * 携带返回的 media_id 做校验和关联，不会再触发第二次 MediaFile::create()。
+     *
+     * @param  array<string, mixed>  $context  同 storeUploadedFile()
+     *
+     * @throws ValidationException 文件不合法 / 落盘失败
+     */
+    public function storeFromUploadedFile(UploadedFile $file, string $disk, string $directory, array $context = []): MediaFile
+    {
+        $directory = trim($directory, '/');
+        $extension = strtolower($file->getClientOriginalExtension() ?: ($file->guessExtension() ?: 'bin'));
+        $filename = $this->generateUniqueDiskFilename($extension);
+
+        if (! Storage::disk($disk)->putFileAs($directory, $file, $filename)) {
+            throw ValidationException::withMessages([
+                'upload_file' => ['文件保存失败，请重试'],
+            ]);
+        }
+
+        $path = $directory !== '' ? $directory.'/'.$filename : $filename;
+        $context['original_name'] = $context['original_name'] ?? $file->getClientOriginalName();
+
+        return $this->storeUploadedFile($disk, $path, $context);
+    }
+
+    /**
      * 校验媒体是否允许删除（存在且未被业务引用），不执行任何删除动作。
      *
      * 用于批量删除前的"预检查"，避免出现部分删除的中间状态。
@@ -244,6 +282,11 @@ class MediaFileService
                 'upload_file' => ['不支持的文件类型：'.$mimeType],
             ]);
         }
+    }
+
+    private function generateUniqueDiskFilename(string $extension): string
+    {
+        return md5(uniqid('', true)).'.'.$extension;
     }
 
     private function generateFileNo(): string

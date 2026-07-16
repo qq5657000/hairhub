@@ -129,7 +129,7 @@ class HairstyleControllerTest extends TestCase
         $hairstyle = $this->makeHairstyle();
         $media = $this->makeMedia();
 
-        $this->controller->applyCoverChange($hairstyle, '', $media->id);
+        $this->controller->applyCoverChange($hairstyle, 0, $media->id);
 
         $this->assertDatabaseHas('hairstyle_media', [
             'hairstyle_id' => $hairstyle->id,
@@ -148,8 +148,8 @@ class HairstyleControllerTest extends TestCase
         $mediaA = $this->makeMedia();
         $mediaB = $this->makeMedia();
 
-        $this->controller->applyCoverChange($hairstyle, '', $mediaA->id);
-        $this->controller->applyCoverChange($hairstyle, '', $mediaB->id);
+        $this->controller->applyCoverChange($hairstyle, 0, $mediaA->id);
+        $this->controller->applyCoverChange($hairstyle, 0, $mediaB->id);
 
         $this->assertDatabaseHas('hairstyle_media', [
             'hairstyle_id' => $hairstyle->id,
@@ -174,7 +174,7 @@ class HairstyleControllerTest extends TestCase
 
         $this->expectException(ValidationException::class);
 
-        $this->controller->applyCoverChange($hairstyle, '', $video->id);
+        $this->controller->applyCoverChange($hairstyle, 0, $video->id);
     }
 
     /**
@@ -187,7 +187,7 @@ class HairstyleControllerTest extends TestCase
 
         $this->expectException(ValidationException::class);
 
-        $this->controller->applyCoverChange($hairstyle, '', $disabled->id);
+        $this->controller->applyCoverChange($hairstyle, 0, $disabled->id);
     }
 
     /**
@@ -197,9 +197,26 @@ class HairstyleControllerTest extends TestCase
     {
         $hairstyle = $this->makeHairstyle();
 
-        $this->controller->applyCoverChange($hairstyle, '', 0);
+        $this->controller->applyCoverChange($hairstyle, 0, 0);
 
         $this->assertDatabaseMissing('hairstyle_media', ['hairstyle_id' => $hairstyle->id]);
         $this->assertNull($hairstyle->refresh()->cover_media_id);
+    }
+
+    /**
+     * 回归覆盖"上传新封面后提交出现重复媒体记录"：uploadMediaId 现在只是引用一个
+     * 已存在的 media_files.id，多次调用 applyCoverChange() 传入同一个 uploadMediaId
+     * 绝不会新增 media_files 记录（对应重复提交/Dcat 后台自动更新场景）。
+     */
+    public function test_apply_cover_change_with_same_upload_media_id_is_idempotent(): void
+    {
+        $hairstyle = $this->makeHairstyle();
+        $media = $this->makeMedia();
+
+        $this->controller->applyCoverChange($hairstyle, $media->id, 0);
+        $this->controller->applyCoverChange($hairstyle, $media->id, 0);
+
+        $this->assertSame($media->id, $hairstyle->refresh()->cover_media_id);
+        $this->assertSame(1, MediaFile::query()->count());
     }
 }

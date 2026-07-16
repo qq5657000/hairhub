@@ -16,9 +16,26 @@ Route::group([
     $router->resource('/member-user',MemberUserController::class);
 
     # 发型中心
+    # cover-upload 与 resource() 生成的 GET /hairstyles/{id} 是同样的两段式路径，
+    # 必须注册在 resource() 之前，避免被 {id} 通配路由抢先匹配（参考 hairstyle-media/media-options）。
+    #
+    # 同时必须显式注册 PUT/PATCH：Dcat 的 WebUploader 字段（vendor/dcat-plus/laravel-admin/
+    # src/Form/Field/WebUploader.php::setDefaultServer()）在表单为"编辑"状态时，
+    # 会自动向上传/删除请求的 formData 里注入 _method=PUT。Laravel 在 Illuminate\Http\Request::
+    # capture() 中默认开启了 HTTP 方法伪装（enableHttpMethodParameterOverride），
+    # 这会让浏览器发出的 POST 请求在路由匹配阶段被当作 PUT 处理。若这里只注册 POST，
+    # 该 PUT 请求就会被 resource() 生成的 PUT /hairstyles/{id} 通配路由抢先匹配
+    # （把字面量 "cover-upload" 当成 {id}），进而在控制器里 findOrFail('cover-upload') 抛出
+    # ModelNotFoundException，被 Laravel 异常处理器转换成 404 响应——这正是编辑页真实浏览器
+    # 上传封面时报 404 的根因。补充 PUT/PATCH 路由指向同一个 uploadCover()，无需改动上传业务逻辑。
+    $router->post('hairstyles/cover-upload', 'HairstyleController@uploadCover');
+    $router->match(['put', 'patch'], 'hairstyles/cover-upload', 'HairstyleController@uploadCover');
     $router->resource('/hairstyles', HairstyleController::class);
     $router->put('hairstyles/{id}/restore', 'HairstyleController@restore');
     $router->delete('hairstyles/{id}/force-delete', 'HairstyleController@forceDelete');
+    # hairstyle-categories/cover-upload 同理，也需要补充 PUT/PATCH（原因见上方注释）。
+    $router->post('hairstyle-categories/cover-upload', 'HairstyleCategoryController@uploadCover');
+    $router->match(['put', 'patch'], 'hairstyle-categories/cover-upload', 'HairstyleCategoryController@uploadCover');
     $router->resource('/hairstyle-categories', HairstyleCategoryController::class);
     $router->resource('/hairstyle-tags', HairstyleTagController::class);
 

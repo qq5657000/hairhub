@@ -27,6 +27,7 @@ use App\Models\HairstyleTagRelation;
 use App\Models\MediaFile;
 use App\Services\Hairstyle\HairstyleMediaService;
 use App\Services\Media\MediaFileService;
+use Dcat\Admin\Admin;
 use Dcat\Admin\Form;
 use Dcat\Admin\Grid;
 use Dcat\Admin\Show;
@@ -34,11 +35,10 @@ use Dcat\Admin\Http\Controllers\AdminController;
 use Dcat\Admin\Http\JsonResponse;
 use Dcat\Admin\Layout\Content;
 use Illuminate\Http\RedirectResponse;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
-use Symfony\Component\HttpFoundation\File\UploadedFile;
 
 /**
  * 发型管理后台 CRUD。
@@ -53,13 +53,6 @@ use Symfony\Component\HttpFoundation\File\UploadedFile;
  */
 class HairstyleController extends AdminController
 {
-    /**
-     * 封面上传字段（虚拟字段 cover_upload）落盘后，原始文件名的临时缓存前缀，
-     * 用法与 MediaFileController::UPLOAD_META_CACHE_PREFIX 一致：File/Image 字段的
-     * 异步预上传拿不到原始文件名，落盘时先缓存，主表单提交时再取出使用。
-     */
-    public const COVER_UPLOAD_META_CACHE_PREFIX = 'hairstyle_cover_upload_meta:';
-
     private HairstyleMediaService $mediaService;
 
     private MediaFileService $mediaFileService;
@@ -439,11 +432,15 @@ class HairstyleController extends AdminController
 
         // 封面输入不再依赖 $id：新建发型时同样允许在同一次提交里上传/选择封面，
         // 在下方事务内先 Hairstyle::create() 拿到 $hairstyle->id 后，applyCoverChange() 才会真正执行关联。
-        $coverUploadPath = (string) request()->input('cover_upload', '');
+        //
+        // cover_upload 现在的提交值不再是磁盘路径，而是 uploadCover() 接口返回的 media_files.id
+        // （由前端上传成功后写入这个隐藏字段），因此这里直接当作 int 读取，不再需要"登记入库"这一步，
+        // applyCoverChange() 只会校验并关联一个已经存在的媒体记录，不会再触发 MediaFile::create()。
+        $coverUploadMediaId = (int) request()->input('cover_upload', 0);
         $coverSelectMediaId = (int) request()->input('cover_select_media_id', 0);
 
         try {
-            $hairstyle = DB::transaction(function () use ($id, $attributes, $tagIds, $coverUploadPath, $coverSelectMediaId) {
+            $hairstyle = DB::transaction(function () use ($id, $attributes, $tagIds, $coverUploadMediaId, $coverSelectMediaId) {
                 if ($id) {
                     /** @var Hairstyle $hairstyle */
                     $hairstyle = Hairstyle::withTrashed()->lockForUpdate()->findOrFail($id);
@@ -459,14 +456,18 @@ class HairstyleController extends AdminController
 
                 // 封面上传/选择与基础字段、标签同步共用同一个事务：任一环节失败都会整体回滚，
                 // 不会出现“基础信息已保存但封面处理失败”的半成功状态。
-                $this->applyCoverChange($hairstyle, $coverUploadPath, $coverSelectMediaId);
+                $this->applyCoverChange($hairstyle, $coverUploadMediaId, $coverSelectMediaId);
 
                 return $hairstyle;
             });
         } catch (ValidationException $e) {
             return JsonResponse::make()->error($this->firstValidationMessage($e));
         } catch (\Throwable $e) {
-            return JsonResponse::make()->error('保存失败：'.$e->getMessage());
+            report($e);
+
+            return JsonResponse::make()->error(
+                config('app.debug') ? ('保存失败：'.$e->getMessage()) : '保存失败，请查看系统日志。'
+            );
         }
 
         $createMessage = $hairstyle->cover_media_id
@@ -501,12 +502,12 @@ class HairstyleController extends AdminController
      *
      * @throws ValidationException 上传/选择的媒体不是图片，或状态不可用
      */
-    public function applyCoverChange(Hairstyle $hairstyle, string $uploadPath, int $selectMediaId): void
+    public function applyCoverChange(Hairstyle $hairstyle, int $uploadMediaId, int $selectMediaId): void
     {
         $mediaId = null;
 
-        if ($uploadPath !== '') {
-            $mediaId = $this->registerCoverUpload($uploadPath)->id;
+        if ($uploadMediaId > 0) {
+            $mediaId = $this->assertImageMedia($uploadMediaId)->id;
         } elseif ($selectMediaId > 0) {
             $mediaId = $this->assertImageMedia($selectMediaId)->id;
         }
@@ -528,33 +529,59 @@ class HairstyleController extends AdminController
     }
 
     /**
-     * 将封面上传字段已经落盘的文件登记为 media_files 记录，并校验确实是图片类型。
-     *
-     * @throws ValidationException
+     * “上传新封面”字段的专用上传接口，语义与 HairstyleCategoryController::uploadCover()
+     * 完全一致：点击"上传"即在同一请求内完成落盘 + MediaFileService 正式入库，返回
+     * media_files.id 供前端写入 cover_upload 隐藏字段，避免"上传只落盘、提交表单才登记入库"
+     * 两阶段流程下重复提交导致的 uk_storage_path 唯一索引冲突和孤儿媒体问题。
      */
-    private function registerCoverUpload(string $path): MediaFile
+    public function uploadCover()
     {
-        $basename = basename($path);
-        $meta = Cache::pull(self::COVER_UPLOAD_META_CACHE_PREFIX.$basename, []);
-
-        $media = $this->mediaFileService->storeUploadedFile('public', $path, [
-            'original_name' => $meta['original_name'] ?? '',
-            'source_type' => MediaSourceType::AdminUpload->value,
-            'visibility' => MediaVisibility::Public->value,
-            'status' => MediaStatus::Active->value,
-        ]);
-
-        if ((int) $media->file_type !== MediaFileType::Image->value) {
-            throw ValidationException::withMessages([
-                'cover_upload' => ['封面只能上传图片文件'],
-            ]);
+        if (request()->filled('key')) {
+            return Admin::json()->send();
         }
 
-        return $media;
+        $file = request()->file('_file_');
+
+        if (! $file) {
+            return JsonResponse::make()->error('未接收到上传文件')->send();
+        }
+
+        $validator = Validator::make(
+            ['cover_upload' => $file],
+            ['cover_upload' => 'required|image|mimes:jpg,jpeg,png,webp|mimetypes:image/jpeg,image/png,image/webp|max:'.MediaFileService::MAX_UPLOAD_SIZE_KB]
+        );
+
+        if ($validator->fails()) {
+            return JsonResponse::make()->error($validator->errors()->first())->send();
+        }
+
+        try {
+            $media = $this->mediaFileService->storeFromUploadedFile($file, 'public', 'media/'.now()->format('Y/m/d'), [
+                'source_type' => MediaSourceType::AdminUpload->value,
+                'visibility' => MediaVisibility::Public->value,
+                'status' => MediaStatus::Active->value,
+            ]);
+        } catch (ValidationException $e) {
+            return JsonResponse::make()->error($this->firstValidationMessage($e))->send();
+        } catch (\Throwable $e) {
+            report($e);
+
+            return JsonResponse::make()->error(
+                config('app.debug') ? ('封面上传失败：'.$e->getMessage()) : '封面上传失败，请查看系统日志。'
+            )->send();
+        }
+
+        return Admin::json([
+            'id' => (string) $media->id,
+            'name' => $media->original_name ?: $media->filename,
+            'path' => (string) $media->id,
+            'url' => $media->thumbnail_url ?: $media->url,
+        ])->send();
     }
 
     /**
-     * 校验从媒体库选择的媒体存在且为图片类型（状态可用由 HairstyleMediaService 内部校验）。
+     * 校验从媒体库选择的媒体（或上传接口刚创建的媒体）存在且为图片类型（状态可用由
+     * HairstyleMediaService 内部校验）。
      *
      * @throws ValidationException
      */
@@ -653,25 +680,15 @@ class HairstyleController extends AdminController
         $form->tab('封面与媒体', function (Form $form) use ($hairstyleId) {
             $form->html(HairstyleController::renderCoverPreview($hairstyleId), '当前封面');
 
+            // 上传接口自定义为 uploadCover()：点击"上传"即在同一请求内完成落盘 + MediaFileService
+            // 登记入库，返回的 id 直接是 media_files.id（不是磁盘路径），写入 cover_upload 隐藏字段。
+            // handleSaving() 只会用这个 media_id 做校验和关联，不会重复创建媒体记录（详见该方法注释）。
+            // autoSave(false) 关闭 Dcat 编辑表单默认的"上传成功后台自动 PUT 更新该列"行为。
             $form->image('cover_upload', '上传新封面')
-                ->disk('public')
-                ->dir(function () {
-                    return 'media/'.now()->format('Y/m/d');
-                })
-                ->name(function (UploadedFile $file) {
-                    $storedName = md5(uniqid('', true)).'.'.strtolower($file->getClientOriginalExtension() ?: 'jpg');
-
-                    Cache::put(
-                        HairstyleController::COVER_UPLOAD_META_CACHE_PREFIX.$storedName,
-                        ['original_name' => $file->getClientOriginalName()],
-                        now()->addMinutes(30)
-                    );
-
-                    return $storedName;
-                })
+                ->url('hairstyles/cover-upload')
+                ->autoSave(false)
                 ->accept('jpg,jpeg,png,webp')
-                ->rules('mimes:jpg,jpeg,png,webp|mimetypes:image/jpeg,image/png,image/webp|max:'.MediaFileService::MAX_UPLOAD_SIZE_KB)
-                ->help($hairstyleId ? '留空表示不更换封面；上传成功后保存表单才会正式生效' : '新建发型时同样支持直接上传封面，保存成功后自动关联并设为封面');
+                ->help($hairstyleId ? '点击“上传”后立即正式创建媒体记录（可在媒体库复用，不会被重复创建）；留空表示不更换封面' : '新建发型时同样支持直接上传封面，保存成功后自动关联并设为封面');
 
             $form->selectTable('cover_select_media_id', '从媒体库选择封面')
                 ->title('选择封面媒体')

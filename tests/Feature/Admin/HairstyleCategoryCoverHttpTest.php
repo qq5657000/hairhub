@@ -19,11 +19,17 @@ use Tests\TestCase;
  * HTTP 路由 -> Dcat AdminController -> Dcat\Admin\Form::store()/update()
  * -> saving() 回调（applyCoverChange） -> Repository -> Eloquent -> 数据库。
  *
- * 覆盖本次修复的两个根因：
+ * 覆盖本次修复的根因：
  * 1. cover_upload / cover_select_media_id / clear_cover 三个虚拟字段绝不会
  *    进入 INSERT/UPDATE 的真实 SQL（此前报错 "Unknown column 'cover_select_media_id'"）；
  * 2. cover_media_id 能够被 saving() 回调正确写入并持久化
- *    （此前因缺少绑定字段被 Dcat prepareInsert()/prepareUpdate() 静默剔除）。
+ *    （此前因缺少绑定字段被 Dcat prepareInsert()/prepareUpdate() 静默剔除）；
+ * 3. "上传新封面后提交出现重复媒体记录"：cover_upload 现在的提交值是 uploadCover()
+ *    接口返回的 media_files.id（不再是磁盘路径），表单保存阶段只校验并关联该 media_id，
+ *    绝不会再调用 MediaFileService::storeUploadedFile() 第二次，无论提交多少次都不会
+ *    触发 uk_storage_path 唯一索引冲突，也不会产生"数据库有记录、物理文件已丢失"的孤儿媒体；
+ * 4. uploadCover() 接口本身：一次成功上传只会产生一条 media_files 记录，原图和缩略图
+ *    都真实落盘，且响应结构符合 Dcat WebUploader 前端约定（status/data.id/data.url）。
  */
 class HairstyleCategoryCoverHttpTest extends TestCase
 {
@@ -134,18 +140,15 @@ class HairstyleCategoryCoverHttpTest extends TestCase
     }
 
     /**
-     * 模拟浏览器真实提交形态：cover_upload 是 Dcat WebUploader 异步上传后已经落盘的
-     * disk 相对路径字符串（例如 media/2026/07/16/xxx.png），不是 UploadedFile 对象。
+     * 模拟浏览器真实提交形态：cover_upload 现在的值是 uploadCover() 接口上传成功后
+     * 返回并写入隐藏字段的 media_files.id（不再是磁盘路径字符串）。
      */
-    public function test_create_category_with_uploaded_cover_path_registers_media_file(): void
+    public function test_create_category_with_uploaded_cover_media_id_links_existing_media(): void
     {
-        Storage::fake('public');
-
-        $path = 'media/'.now()->format('Y/m/d').'/'.uniqid().'.png';
-        Storage::disk('public')->put($path, base64_decode(self::FAKE_PNG_BASE64));
+        $media = $this->makeMedia();
 
         $payload = $this->baseCategoryPayload([
-            'cover_upload' => $path,
+            'cover_upload' => $media->id,
         ]);
 
         $queries = [];
@@ -157,22 +160,113 @@ class HairstyleCategoryCoverHttpTest extends TestCase
         $response->assertStatus(200);
         $response->assertJson(['status' => true]);
 
-        $this->assertDatabaseHas('media_files', [
-            'path' => $path,
-            'file_type' => MediaFileType::Image->value,
-        ]);
-
-        $media = MediaFile::query()->where('path', $path)->first();
-        $this->assertNotNull($media);
-
         $this->assertDatabaseHas('hairstyle_categories', [
             'slug' => $payload['slug'],
             'cover_media_id' => $media->id,
         ]);
 
+        // 核心回归点：提交表单绝不会再调用 MediaFile::create()，media_files 总数保持不变。
+        $this->assertSame(1, MediaFile::query()->count());
+
         $insertSql = collect($queries)->first(fn ($sql) => preg_match('/insert into [`"]?hairstyle_categories[`"]?\s/i', $sql) === 1);
         $this->assertNotNull($insertSql);
         $this->assertStringNotContainsString('cover_upload', $insertSql);
+    }
+
+    /**
+     * 回归覆盖"上传新封面后提交出现重复媒体记录"：同一个 cover_upload media_id 被
+     * 提交两次（模拟 Dcat 后台自动更新 + 用户手动提交，或用户重复点击提交），
+     * media_files 总数必须始终保持为 1，且 cover_media_id 两次都能正确指向该媒体。
+     */
+    public function test_resubmitting_same_uploaded_cover_media_id_does_not_duplicate_media_record(): void
+    {
+        $media = $this->makeMedia();
+
+        $category = HairstyleCategory::create([
+            'parent_id' => 0,
+            'name' => '待关联封面分类',
+            'slug' => 'link-cover-category-'.uniqid(),
+            'cover_media_id' => 0,
+            'status' => HairstyleCategoryStatus::Enabled->value,
+            'sort' => 0,
+        ]);
+
+        $payload = $this->baseCategoryPayload([
+            'slug' => $category->slug,
+            'cover_upload' => $media->id,
+        ]);
+
+        $firstResponse = $this->put(admin_url('hairstyle-categories/'.$category->id), $payload);
+        $firstResponse->assertStatus(200);
+        $firstResponse->assertJson(['status' => true]);
+
+        $secondResponse = $this->put(admin_url('hairstyle-categories/'.$category->id), $payload);
+        $secondResponse->assertStatus(200);
+        $secondResponse->assertJson(['status' => true]);
+
+        $this->assertDatabaseHas('hairstyle_categories', [
+            'id' => $category->id,
+            'cover_media_id' => $media->id,
+        ]);
+
+        $this->assertSame(1, MediaFile::query()->count());
+    }
+
+    /**
+     * 验证新的 uploadCover() 接口本身：一次成功上传只产生一条 media_files 记录，
+     * 原图和缩略图都真实落盘，响应结构符合 Dcat WebUploader 前端约定
+     * （status=true，data.id 是 media_id，data.url 可用于预览）。
+     */
+    public function test_upload_cover_endpoint_creates_exactly_one_media_record(): void
+    {
+        Storage::fake('public');
+
+        $file = \Illuminate\Http\UploadedFile::fake()->createWithContent(
+            'cover.png',
+            base64_decode(self::FAKE_PNG_BASE64)
+        );
+
+        $response = $this->post(admin_url('hairstyle-categories/cover-upload'), [
+            '_file_' => $file,
+        ]);
+
+        $response->assertStatus(200);
+        $response->assertJson(['status' => true]);
+
+        $this->assertSame(1, MediaFile::query()->count());
+
+        $media = MediaFile::query()->first();
+        $this->assertNotNull($media);
+        $this->assertSame(MediaFileType::Image->value, (int) $media->file_type);
+        $this->assertSame(MediaStatus::Active->value, (int) $media->status);
+
+        Storage::disk('public')->assertExists($media->path);
+
+        if ($media->thumbnail_path !== '') {
+            Storage::disk('public')->assertExists($media->thumbnail_path);
+        }
+
+        $response->assertJsonPath('data.id', (string) $media->id);
+    }
+
+    /**
+     * 上传非图片文件时，uploadCover() 必须拒绝并且不产生任何 media_files 记录
+     * （避免脏数据进入媒体库，也避免依赖"先创建再删除"的补偿逻辑）。
+     */
+    public function test_upload_cover_endpoint_rejects_non_image_file(): void
+    {
+        Storage::fake('public');
+
+        $file = \Illuminate\Http\UploadedFile::fake()->create('not-image.txt', 10, 'text/plain');
+
+        $response = $this->post(admin_url('hairstyle-categories/cover-upload'), [
+            '_file_' => $file,
+        ]);
+
+        $response->assertStatus(200);
+        $response->assertJson(['status' => false]);
+
+        $this->assertSame(0, MediaFile::query()->count());
     }
 
     public function test_update_category_without_touching_cover_keeps_original_cover(): void

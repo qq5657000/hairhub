@@ -179,28 +179,22 @@ class HairstyleCoverHttpTest extends TestCase
     }
 
     /**
-     * 6.4 新建发型 + 上传新封面：携带浏览器真实的上传路径值（disk 相对路径字符串），
-     * 断言 media_files / hairstyles / hairstyle_media 全部正确创建，不产生半成功数据。
+     * 6.4 新建发型 + 上传新封面：cover_upload 现在的值是 uploadCover() 接口上传成功后
+     * 返回并写入隐藏字段的 media_files.id（不再是磁盘路径字符串），断言 hairstyles /
+     * hairstyle_media 正确创建，且绝不会重复创建 media_files 记录。
      */
-    public function test_create_hairstyle_with_uploaded_cover_path(): void
+    public function test_create_hairstyle_with_uploaded_cover_media_id(): void
     {
-        Storage::fake('public');
-
-        $path = 'media/'.now()->format('Y/m/d').'/'.uniqid().'.png';
-        Storage::disk('public')->put($path, base64_decode(self::FAKE_PNG_BASE64));
+        $media = $this->makeMedia();
 
         $payload = $this->basePayload([
-            'cover_upload' => $path,
+            'cover_upload' => $media->id,
         ]);
 
         $response = $this->post(admin_url('hairstyles'), $payload);
 
         $response->assertStatus(200);
         $response->assertJson(['status' => true]);
-
-        $media = MediaFile::query()->where('path', $path)->first();
-        $this->assertNotNull($media, '封面上传未登记为 media_files 记录');
-        $this->assertSame(MediaFileType::Image->value, (int) $media->file_type);
 
         $hairstyle = Hairstyle::query()->where('slug', $payload['slug'])->first();
         $this->assertNotNull($hairstyle);
@@ -211,6 +205,75 @@ class HairstyleCoverHttpTest extends TestCase
             'media_id' => $media->id,
             'is_primary' => 1,
         ]);
+
+        // 核心回归点：提交表单绝不会再调用 MediaFile::create()，media_files 总数保持不变。
+        $this->assertSame(1, MediaFile::query()->count());
+    }
+
+    /**
+     * 回归覆盖"上传新封面后提交出现重复媒体记录"：同一个 cover_upload media_id 被
+     * 提交两次（模拟 Dcat 后台自动更新 + 用户手动提交，或用户重复点击提交/编辑其它字段后重新保存），
+     * media_files 总数必须始终保持为 1。
+     */
+    public function test_resubmitting_same_uploaded_cover_media_id_does_not_duplicate_media_record(): void
+    {
+        $media = $this->makeMedia();
+
+        $payload = $this->basePayload([
+            'cover_upload' => $media->id,
+        ]);
+
+        $createResponse = $this->post(admin_url('hairstyles'), $payload);
+        $createResponse->assertStatus(200);
+        $createResponse->assertJson(['status' => true]);
+
+        $hairstyle = Hairstyle::query()->where('slug', $payload['slug'])->first();
+        $this->assertNotNull($hairstyle);
+
+        $updatePayload = $this->basePayload([
+            'category_id' => $hairstyle->category_id,
+            'slug' => $hairstyle->slug,
+            'cover_upload' => $media->id,
+        ]);
+
+        $updateResponse = $this->put(admin_url('hairstyles/'.$hairstyle->id), $updatePayload);
+        $updateResponse->assertStatus(200);
+        $updateResponse->assertJson(['status' => true]);
+
+        $hairstyle->refresh();
+        $this->assertSame($media->id, $hairstyle->cover_media_id);
+        $this->assertSame(1, MediaFile::query()->count());
+    }
+
+    /**
+     * 验证新的 uploadCover() 接口本身：一次成功上传只产生一条 media_files 记录，
+     * 原图和缩略图都真实落盘，响应结构符合 Dcat WebUploader 前端约定。
+     */
+    public function test_upload_cover_endpoint_creates_exactly_one_media_record(): void
+    {
+        Storage::fake('public');
+
+        $file = \Illuminate\Http\UploadedFile::fake()->createWithContent(
+            'cover.png',
+            base64_decode(self::FAKE_PNG_BASE64)
+        );
+
+        $response = $this->post(admin_url('hairstyles/cover-upload'), [
+            '_file_' => $file,
+        ]);
+
+        $response->assertStatus(200);
+        $response->assertJson(['status' => true]);
+
+        $this->assertSame(1, MediaFile::query()->count());
+
+        $media = MediaFile::query()->first();
+        $this->assertNotNull($media);
+        $this->assertSame(MediaFileType::Image->value, (int) $media->file_type);
+
+        Storage::disk('public')->assertExists($media->path);
+
+        $response->assertJsonPath('data.id', (string) $media->id);
     }
 
     /**
@@ -295,15 +358,13 @@ class HairstyleCoverHttpTest extends TestCase
     }
 
     /**
-     * 6.6 异常回滚：上传路径在磁盘上不存在（例如前端上传失败但仍提交了路径），
-     * MediaFileService::storeUploadedFile() 应拒绝并整体回滚。
+     * 6.6 异常回滚：cover_upload 携带一个不存在的 media_id（例如前端上传失败/被篡改），
+     * applyCoverChange() 应拒绝并整体回滚，不创建任何数据。
      */
-    public function test_create_hairstyle_rejects_missing_upload_path_and_rolls_back(): void
+    public function test_create_hairstyle_rejects_missing_upload_media_and_rolls_back(): void
     {
-        Storage::fake('public');
-
         $payload = $this->basePayload([
-            'cover_upload' => 'media/2026/01/01/does-not-exist.png',
+            'cover_upload' => 999999,
         ]);
 
         $response = $this->post(admin_url('hairstyles'), $payload);

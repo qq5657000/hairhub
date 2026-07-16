@@ -12,24 +12,18 @@ use App\Models\Hairstyle;
 use App\Models\HairstyleCategory;
 use App\Models\MediaFile;
 use App\Services\Media\MediaFileService;
+use Dcat\Admin\Admin;
 use Dcat\Admin\Form;
 use Dcat\Admin\Grid;
 use Dcat\Admin\Show;
 use Dcat\Admin\Http\Controllers\AdminController;
 use Dcat\Admin\Http\JsonResponse;
 use Dcat\Admin\Layout\Content;
-use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\ValidationException;
-use Symfony\Component\HttpFoundation\File\UploadedFile;
 
 class HairstyleCategoryController extends AdminController
 {
-    /**
-     * 封面上传字段（虚拟字段 cover_upload）落盘后，原始文件名的临时缓存前缀，
-     * 用法与 MediaFileController::UPLOAD_META_CACHE_PREFIX 一致。
-     */
-    public const COVER_UPLOAD_META_CACHE_PREFIX = 'hairstyle_category_cover_upload_meta:';
-
     private MediaFileService $mediaFileService;
 
     public function __construct(MediaFileService $mediaFileService)
@@ -156,25 +150,18 @@ class HairstyleCategoryController extends AdminController
 
             $form->html(HairstyleCategoryController::renderCoverPreview($category), '当前封面');
 
+            // 上传接口自定义为 uploadCover()：与 Dcat 默认"异步上传只落盘，提交表单时才登记入库"
+            // 的两阶段流程不同，这里点击"上传"即在同一请求内完成落盘 + MediaFileService 登记入库，
+            // 返回的 id 直接是 media_files.id（不是磁盘路径）。表单隐藏字段（cover_upload 本身）
+            // 提交时携带的就是这个 media_id，saving() 回调只做校验和关联，不会再次创建媒体记录，
+            // 从根本上避免重复提交/后台自动更新触发第二次 MediaFile::create() 引发的唯一索引冲突。
+            // autoSave(false) 关闭 Dcat 编辑表单默认的"上传成功后台自动 PUT 更新该列"行为，
+            // 避免用户点击"上传"后，还没点主表单"提交"就已经悄悄触发一次 saving() 回调。
             $form->image('cover_upload', '上传新封面')
-                ->disk('public')
-                ->dir(function () {
-                    return 'media/'.now()->format('Y/m/d');
-                })
-                ->name(function (UploadedFile $file) {
-                    $storedName = md5(uniqid('', true)).'.'.strtolower($file->getClientOriginalExtension() ?: 'jpg');
-
-                    Cache::put(
-                        HairstyleCategoryController::COVER_UPLOAD_META_CACHE_PREFIX.$storedName,
-                        ['original_name' => $file->getClientOriginalName()],
-                        now()->addMinutes(30)
-                    );
-
-                    return $storedName;
-                })
+                ->url('hairstyle-categories/cover-upload')
+                ->autoSave(false)
                 ->accept('jpg,jpeg,png,webp')
-                ->rules('mimes:jpg,jpeg,png,webp|mimetypes:image/jpeg,image/png,image/webp|max:'.MediaFileService::MAX_UPLOAD_SIZE_KB)
-                ->help('上传新文件优先级最高；留空表示不更换封面');
+                ->help('点击“上传”后立即正式创建媒体记录（可在媒体库复用，不会被重复创建）；保存表单时只做关联；留空表示不更换封面');
 
             $form->selectTable('cover_select_media_id', '从媒体库选择封面')
                 ->title('选择封面媒体')
@@ -302,16 +289,23 @@ class HairstyleCategoryController extends AdminController
         // 必须改为直接读取底层 Illuminate\Http\Request（request() 助手，与 Form 内部持有的是
         // 同一个单例对象，不受 Dcat removeIgnoredFields() 影响），且 Request::input($key,$default)
         // 才是真正安全的"取值加默认值"语义。
-        $uploadPath = (string) request()->input('cover_upload', '');
+        //
+        // cover_upload 现在的提交值不再是磁盘路径，而是 uploadCover() 接口返回的 media_files.id
+        // （由前端上传成功后写入这个隐藏字段），因此这里直接当作 int 读取，不再需要"登记入库"这一步。
+        $uploadMediaId = (int) request()->input('cover_upload', 0);
         $selectMediaId = (int) request()->input('cover_select_media_id', 0);
         $clearCover = (bool) request()->input('clear_cover', false);
 
         try {
-            $mediaId = $this->resolveCoverMediaId($uploadPath, $selectMediaId, $clearCover, $currentCoverMediaId);
+            $mediaId = $this->resolveCoverMediaId($uploadMediaId, $selectMediaId, $clearCover, $currentCoverMediaId);
         } catch (ValidationException $e) {
             return JsonResponse::make()->error($this->firstValidationMessage($e));
         } catch (\Throwable $e) {
-            return JsonResponse::make()->error('封面处理失败：'.$e->getMessage());
+            report($e);
+
+            return JsonResponse::make()->error(
+                config('app.debug') ? ('封面处理失败：'.$e->getMessage()) : '封面保存失败，请查看系统日志。'
+            );
         }
 
         $form->cover_media_id = $mediaId;
@@ -320,17 +314,21 @@ class HairstyleCategoryController extends AdminController
     }
 
     /**
-     * 结合纯决策函数 decideCoverAction() 与实际 I/O（登记上传文件 / 校验库内媒体），
+     * 结合纯决策函数 decideCoverAction() 与实际 I/O（校验媒体是否存在/可用），
      * 计算出最终应写入 cover_media_id 的值；不依赖 Dcat Form 对象，便于直接单测。
+     *
+     * 上传和库内选择现在都只是"引用一个已经存在的 media_files.id"，不会再触发任何
+     * MediaFile::create()，因此天然具备幂等性：无论 saving() 被触发多少次（重复提交、
+     * Dcat 后台自动更新等），只要 media_id 不变，结果都是同一次校验 + 同一次关联。
      *
      * @throws ValidationException 上传/选择的媒体不合法
      */
-    public function resolveCoverMediaId(string $uploadPath, int $selectMediaId, bool $clearCover, int $currentCoverMediaId): int
+    public function resolveCoverMediaId(int $uploadMediaId, int $selectMediaId, bool $clearCover, int $currentCoverMediaId): int
     {
-        $decision = self::decideCoverAction($uploadPath, $selectMediaId, $clearCover, $currentCoverMediaId);
+        $decision = self::decideCoverAction($uploadMediaId, $selectMediaId, $clearCover, $currentCoverMediaId);
 
         return match ($decision['action']) {
-            'upload' => $this->registerCoverUpload($uploadPath)->id,
+            'upload' => $this->assertImageMedia($uploadMediaId)->id,
             'select' => $this->assertImageMedia($selectMediaId)->id,
             default => $decision['media_id'],
         };
@@ -341,12 +339,12 @@ class HairstyleCategoryController extends AdminController
      * 判断本次保存应采取的封面动作，便于直接单测覆盖优先级规则。
      *
      * @return array{action: string, media_id: int|null} action 为 upload/select/clear/keep 之一；
-     *                                                     media_id 仅在 select/clear/keep 时确定，upload 需要先落库才能得到
+     *                                                     media_id 在 upload/select 时就是对应的媒体 ID，clear/keep 时确定
      */
-    public static function decideCoverAction(string $uploadPath, int $selectMediaId, bool $clearCover, int $currentCoverMediaId): array
+    public static function decideCoverAction(int $uploadMediaId, int $selectMediaId, bool $clearCover, int $currentCoverMediaId): array
     {
-        if ($uploadPath !== '') {
-            return ['action' => 'upload', 'media_id' => null];
+        if ($uploadMediaId > 0) {
+            return ['action' => 'upload', 'media_id' => $uploadMediaId];
         }
 
         if ($selectMediaId > 0) {
@@ -361,33 +359,65 @@ class HairstyleCategoryController extends AdminController
     }
 
     /**
-     * 将封面上传字段已经落盘的文件登记为 media_files 记录，并校验确实是图片类型。
+     * “上传新封面”字段的专用上传接口：与 Dcat 默认的"异步上传只落盘，提交表单时才登记入库"
+     * 两阶段流程不同，这里在文件落盘的同一个请求内立即调用 MediaFileService 正式创建
+     * media_files 记录（原图 + 缩略图 + 数据库记录一次性生成，不留下"半成品"）。
      *
-     * @throws ValidationException
+     * 返回结构沿用 Dcat WebUploader 前端约定（id/name/path/url），唯一区别是 id 直接是
+     * media_files.id（不是磁盘路径）——这个 id 会被前端写入 cover_upload 隐藏字段，
+     * 表单提交时 applyCoverChange() 只需要校验这个 media_id 并关联，不会再重复创建媒体记录。
+     *
+     * 同时兼容前端"移除已上传预览缩略图"的删除请求（携带 key 参数，不携带文件）：
+     * 由于媒体已经正式入库，这里不做任何删除，只让前端把预览从界面上移除即可，
+     * 媒体记录/物理文件仍保留在媒体库中供后续复用。
      */
-    private function registerCoverUpload(string $path): MediaFile
+    public function uploadCover()
     {
-        $basename = basename($path);
-        $meta = Cache::pull(self::COVER_UPLOAD_META_CACHE_PREFIX.$basename, []);
-
-        $media = $this->mediaFileService->storeUploadedFile('public', $path, [
-            'original_name' => $meta['original_name'] ?? '',
-            'source_type' => MediaSourceType::AdminUpload->value,
-            'visibility' => MediaVisibility::Public->value,
-            'status' => MediaStatus::Active->value,
-        ]);
-
-        if ((int) $media->file_type !== MediaFileType::Image->value) {
-            throw ValidationException::withMessages([
-                'cover_upload' => ['封面只能上传图片文件'],
-            ]);
+        if (request()->filled('key')) {
+            return Admin::json()->send();
         }
 
-        return $media;
+        $file = request()->file('_file_');
+
+        if (! $file) {
+            return JsonResponse::make()->error('未接收到上传文件')->send();
+        }
+
+        $validator = Validator::make(
+            ['cover_upload' => $file],
+            ['cover_upload' => 'required|image|mimes:jpg,jpeg,png,webp|mimetypes:image/jpeg,image/png,image/webp|max:'.MediaFileService::MAX_UPLOAD_SIZE_KB]
+        );
+
+        if ($validator->fails()) {
+            return JsonResponse::make()->error($validator->errors()->first())->send();
+        }
+
+        try {
+            $media = $this->mediaFileService->storeFromUploadedFile($file, 'public', 'media/'.now()->format('Y/m/d'), [
+                'source_type' => MediaSourceType::AdminUpload->value,
+                'visibility' => MediaVisibility::Public->value,
+                'status' => MediaStatus::Active->value,
+            ]);
+        } catch (ValidationException $e) {
+            return JsonResponse::make()->error($this->firstValidationMessage($e))->send();
+        } catch (\Throwable $e) {
+            report($e);
+
+            return JsonResponse::make()->error(
+                config('app.debug') ? ('封面上传失败：'.$e->getMessage()) : '封面上传失败，请查看系统日志。'
+            )->send();
+        }
+
+        return Admin::json([
+            'id' => (string) $media->id,
+            'name' => $media->original_name ?: $media->filename,
+            'path' => (string) $media->id,
+            'url' => $media->thumbnail_url ?: $media->url,
+        ])->send();
     }
 
     /**
-     * 校验从媒体库选择的媒体存在、为图片类型且状态可用。
+     * 校验从媒体库选择的媒体（或上传接口刚创建的媒体）存在、为图片类型且状态可用。
      *
      * @throws ValidationException
      */

@@ -45,7 +45,7 @@ class HairstyleMediaController extends AdminController
     {
         return $content
             ->header('发型媒体管理')
-            ->description('关联媒体 / 设为主图 / 编辑 / 移除')
+            ->description('关联媒体 / 设为封面 / 编辑 / 移除')
             ->body($this->grid());
     }
 
@@ -75,8 +75,8 @@ class HairstyleMediaController extends AdminController
             $grid->column('type', '类型')->using(HairstyleMediaType::options());
             $grid->column('title', '标题');
             $grid->column('alt_text', 'ALT 文本');
-            $grid->column('is_primary', '主图')->display(function ($value) {
-                return $value ? '<span class="label label-success">主图</span>' : '';
+            $grid->column('is_primary', '封面')->display(function ($value) {
+                return $value ? '<span class="label label-success">封面</span>' : '';
             });
             $grid->column('status', '状态')->using(HairstyleMediaStatus::options());
             $grid->column('sort', '排序')->sortable();
@@ -138,7 +138,7 @@ class HairstyleMediaController extends AdminController
             $show->field('title', '标题');
             $show->field('alt_text', 'ALT 文本');
             $show->field('caption', '说明');
-            $show->field('is_primary', '主图')->using([0 => '否', 1 => '是']);
+            $show->field('is_primary', '封面')->using([0 => '否', 1 => '是']);
             $show->field('status', '状态')->using(HairstyleMediaStatus::options());
             $show->field('sort', '排序值');
             $show->field('created_at', '关联时间');
@@ -200,7 +200,7 @@ class HairstyleMediaController extends AdminController
             $form->textarea('caption', '说明')->rows(2)->rules('max:500');
             $form->select('status', '状态')->options(HairstyleMediaStatus::options())->default(HairstyleMediaStatus::Enabled->value);
             $form->number('sort', '排序值')->min(0)->default(0);
-            $form->switch('is_primary', '设为主图')->help('开启后会调用 HairstyleMediaService::setPrimaryMedia() 统一维护主图和发型封面');
+            $form->switch('is_primary', '设为封面')->help('开启后会调用 HairstyleMediaService::setPrimaryMedia() 统一维护主图和发型封面');
 
             $form->saving(function (Form $form) use ($self) {
                 return $form->isCreating() ? $self->handleCreating($form) : $self->handleUpdating($form);
@@ -237,7 +237,7 @@ class HairstyleMediaController extends AdminController
             return redirect()->back();
         }
 
-        admin_toastr('已设为主图');
+        admin_toastr('已设为封面');
 
         return redirect()->back();
     }
@@ -350,13 +350,16 @@ class HairstyleMediaController extends AdminController
      */
     private function extractAttributes(Form $form): array
     {
+        // 注意：Dcat Form::input($key, $value) 的第二个参数是"写入值"而不是"取值默认值"，
+        // 必须写成 input($key) ?? 默认值，否则会把默认值当作提交值强行写回表单，
+        // 导致 title/alt_text/caption/sort 无论浏览器实际提交了什么都被静默重置。
         return [
             'type' => (int) $form->input('type'),
-            'title' => (string) $form->input('title', ''),
-            'alt_text' => (string) $form->input('alt_text', ''),
-            'caption' => (string) $form->input('caption', ''),
+            'title' => (string) ($form->input('title') ?? ''),
+            'alt_text' => (string) ($form->input('alt_text') ?? ''),
+            'caption' => (string) ($form->input('caption') ?? ''),
             'status' => (int) $form->input('status'),
-            'sort' => (int) $form->input('sort', 0),
+            'sort' => (int) ($form->input('sort') ?? 0),
             'is_primary' => (bool) $form->input('is_primary'),
         ];
     }
@@ -392,10 +395,10 @@ class HairstyleMediaController extends AdminController
         $token = csrf_token();
 
         return <<<HTML
-<form method="POST" action="{$url}" style="display:inline-block;margin-right:8px;" onsubmit="return confirm('确定要将该媒体设为主图吗？');">
+<form method="POST" action="{$url}" style="display:inline-block;margin-right:8px;" onsubmit="return confirm('确定要将该媒体设为封面吗？');">
     <input type="hidden" name="_token" value="{$token}">
     <input type="hidden" name="_method" value="PUT">
-    <button type="submit" class="btn btn-link" style="padding:0;border:0;background:none;color:#f39c12;" title="设为主图"><i class="feather icon-star"></i></button>
+    <button type="submit" class="btn btn-link" style="padding:0;border:0;background:none;color:#f39c12;" title="设为封面"><i class="feather icon-star"></i></button>
 </form>
 HTML;
     }

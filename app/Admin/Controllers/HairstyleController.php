@@ -2,6 +2,7 @@
 
 namespace App\Admin\Controllers;
 
+use App\Admin\Renderable\MediaImageTable;
 use App\Enums\Hairstyle\FaceShape;
 use App\Enums\Hairstyle\HairstyleAgeRange;
 use App\Enums\Hairstyle\HairstyleGender;
@@ -14,11 +15,18 @@ use App\Enums\Hairstyle\HairstyleMediaType;
 use App\Enums\Hairstyle\HairstyleStatus;
 use App\Enums\Hairstyle\HairstyleStyleType;
 use App\Enums\Hairstyle\SuitableScene;
+use App\Enums\Media\MediaFileType;
+use App\Enums\Media\MediaSourceType;
+use App\Enums\Media\MediaStatus;
+use App\Enums\Media\MediaVisibility;
 use App\Models\Hairstyle;
 use App\Models\HairstyleCategory;
 use App\Models\HairstyleMedia;
 use App\Models\HairstyleTag;
 use App\Models\HairstyleTagRelation;
+use App\Models\MediaFile;
+use App\Services\Hairstyle\HairstyleMediaService;
+use App\Services\Media\MediaFileService;
 use Dcat\Admin\Form;
 use Dcat\Admin\Grid;
 use Dcat\Admin\Show;
@@ -26,8 +34,11 @@ use Dcat\Admin\Http\Controllers\AdminController;
 use Dcat\Admin\Http\JsonResponse;
 use Dcat\Admin\Layout\Content;
 use Illuminate\Http\RedirectResponse;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
+use Symfony\Component\HttpFoundation\File\UploadedFile;
 
 /**
  * 发型管理后台 CRUD。
@@ -42,6 +53,23 @@ use Illuminate\Validation\Rule;
  */
 class HairstyleController extends AdminController
 {
+    /**
+     * 封面上传字段（虚拟字段 cover_upload）落盘后，原始文件名的临时缓存前缀，
+     * 用法与 MediaFileController::UPLOAD_META_CACHE_PREFIX 一致：File/Image 字段的
+     * 异步预上传拿不到原始文件名，落盘时先缓存，主表单提交时再取出使用。
+     */
+    public const COVER_UPLOAD_META_CACHE_PREFIX = 'hairstyle_cover_upload_meta:';
+
+    private HairstyleMediaService $mediaService;
+
+    private MediaFileService $mediaFileService;
+
+    public function __construct(HairstyleMediaService $mediaService, MediaFileService $mediaFileService)
+    {
+        $this->mediaService = $mediaService;
+        $this->mediaFileService = $mediaFileService;
+    }
+
     /**
      * page index
      */
@@ -290,11 +318,11 @@ class HairstyleController extends AdminController
                 $form->datetime('published_at', '发布时间')->help('留空表示暂未设置发布时间，不会自动取创建时间');
             });
 
-            if ($id) {
-                $self->buildMediaManagementTab($form, (int) $id);
-            }
+            // 新建发型时同样需要显示封面上传/选择入口（不再要求"先保存、再进编辑页传封面"），
+            // buildCoverAndMediaTab() 内部会根据 $hairstyleId 是否为 null 决定是否展示"已关联媒体"面板。
+            $self->buildCoverAndMediaTab($form, $id ? (int) $id : null);
 
-            $form->ignore(['tags']);
+            $form->ignore(['tags', 'cover_upload', 'cover_select_media_id']);
 
             $form->saving(function (Form $form) use ($self) {
                 return $self->handleSaving($form);
@@ -376,19 +404,31 @@ class HairstyleController extends AdminController
      */
     private function handleSaving(Form $form): JsonResponse
     {
-        $faceShape = $this->normalizeEnumArrayInput($form->input('face_shape', []), FaceShape::values());
+        // 注意 1：Dcat Form::input($key, $value) 的第二个参数是"写入值"而不是"取值默认值"——
+        // 只有省略第二个参数或显式传 null 时它才是纯 getter（返回 Arr::get($this->inputs, $key)），
+        // 只要传了任何非 null 的第二个参数（哪怕是 0/''/[]），都会执行 Arr::set($this->inputs, $key, $value)
+        // 把这个"默认值"当成提交值强行写回表单。face_shape/suitable_scene 是真实数据库字段（未被
+        // ignore()），因此可以用 "input($key) ?? 默认值" 正确读取真实提交值。
+        $faceShape = $this->normalizeEnumArrayInput($form->input('face_shape') ?? [], FaceShape::values());
 
         if ($faceShape === false) {
             return JsonResponse::make()->error('适合脸型包含无效选项');
         }
 
-        $suitableScene = $this->normalizeEnumArrayInput($form->input('suitable_scene', []), SuitableScene::values());
+        $suitableScene = $this->normalizeEnumArrayInput($form->input('suitable_scene') ?? [], SuitableScene::values());
 
         if ($suitableScene === false) {
             return JsonResponse::make()->error('适用场景包含无效选项');
         }
 
-        $tagIds = array_values(array_unique(array_map('intval', array_filter((array) $form->input('tags', [])))));
+        // 注意 2：tags / cover_upload / cover_select_media_id 三个虚拟字段都在下方 $form->ignore([...])
+        // 名单里，而 Dcat Form::prepare() 会在触发 saving() 回调之前就先执行 removeIgnoredFields()，
+        // 把这些字段从 $this->inputs 中删除——也就是说，无论 $form->input() 怎么调用，
+        // 在 saving() 回调里都读不到这三个字段的真实提交值。必须改为直接读取底层
+        // Illuminate\Http\Request（request() 助手，与 Form 内部持有的是同一个单例对象，
+        // 不受 Dcat removeIgnoredFields() 影响），且 Request::input($key, $default) 才是
+        // 真正安全的"取值加默认值"语义。
+        $tagIds = array_values(array_unique(array_map('intval', array_filter((array) request()->input('tags', [])))));
 
         if ($tagIds !== [] && HairstyleTag::query()->whereIn('id', $tagIds)->count() !== count($tagIds)) {
             return JsonResponse::make()->error('标签中包含无效的标签 ID');
@@ -397,8 +437,13 @@ class HairstyleController extends AdminController
         $id = $form->getKey();
         $attributes = $this->extractBasicAttributes($form, $faceShape, $suitableScene);
 
+        // 封面输入不再依赖 $id：新建发型时同样允许在同一次提交里上传/选择封面，
+        // 在下方事务内先 Hairstyle::create() 拿到 $hairstyle->id 后，applyCoverChange() 才会真正执行关联。
+        $coverUploadPath = (string) request()->input('cover_upload', '');
+        $coverSelectMediaId = (int) request()->input('cover_select_media_id', 0);
+
         try {
-            $hairstyle = DB::transaction(function () use ($id, $attributes, $tagIds) {
+            $hairstyle = DB::transaction(function () use ($id, $attributes, $tagIds, $coverUploadPath, $coverSelectMediaId) {
                 if ($id) {
                     /** @var Hairstyle $hairstyle */
                     $hairstyle = Hairstyle::withTrashed()->lockForUpdate()->findOrFail($id);
@@ -408,17 +453,27 @@ class HairstyleController extends AdminController
                     $hairstyle = Hairstyle::create($attributes);
                 }
 
-                // cover_media_id 全程不出现在表单字段中，也不会在此处被赋值，
-                // 该字段唯一的写入入口是 HairstyleMediaService（见 HairstyleMediaController）。
+                // cover_media_id 不会在此处被直接赋值，该字段唯一的写入入口是
+                // HairstyleMediaService（见下方 applyCoverChange() 和 HairstyleMediaController）。
                 $hairstyle->tags()->sync($tagIds);
+
+                // 封面上传/选择与基础字段、标签同步共用同一个事务：任一环节失败都会整体回滚，
+                // 不会出现“基础信息已保存但封面处理失败”的半成功状态。
+                $this->applyCoverChange($hairstyle, $coverUploadPath, $coverSelectMediaId);
 
                 return $hairstyle;
             });
+        } catch (ValidationException $e) {
+            return JsonResponse::make()->error($this->firstValidationMessage($e));
         } catch (\Throwable $e) {
             return JsonResponse::make()->error('保存失败：'.$e->getMessage());
         }
 
-        $response = JsonResponse::make()->success($id ? '更新成功' : '创建成功，可在下方“媒体管理”标签页继续关联媒体');
+        $createMessage = $hairstyle->cover_media_id
+            ? '发型创建成功，封面已设置'
+            : '发型创建成功，请继续在“封面与媒体”标签页中上传或选择封面';
+
+        $response = JsonResponse::make()->success($id ? '更新成功' : $createMessage);
 
         return $id
             ? $response->refresh()
@@ -436,6 +491,99 @@ class HairstyleController extends AdminController
     }
 
     /**
+     * 应用封面变更：上传新文件优先，其次是从媒体库选择的媒体，两者都没有则不改变封面。
+     *
+     * 必须在调用方已经开启的事务内执行：得到目标 media_id 后，若尚未关联当前发型则先
+     * HairstyleMediaService::attachMedia()，再统一 HairstyleMediaService::setPrimaryMedia()
+     * 完成 hairstyle_media.is_primary 和 hairstyles.cover_media_id 的同步，不在本方法内直接
+     * 更新这两个表。封面场景下“必须是图片类型”的校验在这里完成，不侵入 HairstyleMediaService
+     * 的通用媒体关联能力（hairstyle_media 本身允许非图片类型的画廊媒体）。
+     *
+     * @throws ValidationException 上传/选择的媒体不是图片，或状态不可用
+     */
+    public function applyCoverChange(Hairstyle $hairstyle, string $uploadPath, int $selectMediaId): void
+    {
+        $mediaId = null;
+
+        if ($uploadPath !== '') {
+            $mediaId = $this->registerCoverUpload($uploadPath)->id;
+        } elseif ($selectMediaId > 0) {
+            $mediaId = $this->assertImageMedia($selectMediaId)->id;
+        }
+
+        if ($mediaId === null) {
+            return;
+        }
+
+        $alreadyAttached = HairstyleMedia::query()
+            ->where('hairstyle_id', $hairstyle->id)
+            ->where('media_id', $mediaId)
+            ->exists();
+
+        if (! $alreadyAttached) {
+            $this->mediaService->attachMedia($hairstyle->id, $mediaId);
+        }
+
+        $this->mediaService->setPrimaryMedia($hairstyle->id, $mediaId);
+    }
+
+    /**
+     * 将封面上传字段已经落盘的文件登记为 media_files 记录，并校验确实是图片类型。
+     *
+     * @throws ValidationException
+     */
+    private function registerCoverUpload(string $path): MediaFile
+    {
+        $basename = basename($path);
+        $meta = Cache::pull(self::COVER_UPLOAD_META_CACHE_PREFIX.$basename, []);
+
+        $media = $this->mediaFileService->storeUploadedFile('public', $path, [
+            'original_name' => $meta['original_name'] ?? '',
+            'source_type' => MediaSourceType::AdminUpload->value,
+            'visibility' => MediaVisibility::Public->value,
+            'status' => MediaStatus::Active->value,
+        ]);
+
+        if ((int) $media->file_type !== MediaFileType::Image->value) {
+            throw ValidationException::withMessages([
+                'cover_upload' => ['封面只能上传图片文件'],
+            ]);
+        }
+
+        return $media;
+    }
+
+    /**
+     * 校验从媒体库选择的媒体存在且为图片类型（状态可用由 HairstyleMediaService 内部校验）。
+     *
+     * @throws ValidationException
+     */
+    private function assertImageMedia(int $mediaId): MediaFile
+    {
+        /** @var MediaFile|null $media */
+        $media = MediaFile::query()->find($mediaId);
+
+        if (! $media) {
+            throw ValidationException::withMessages([
+                'cover_select_media_id' => ['所选媒体不存在'],
+            ]);
+        }
+
+        if ((int) $media->file_type !== MediaFileType::Image->value) {
+            throw ValidationException::withMessages([
+                'cover_select_media_id' => ['封面只能选择图片类型的媒体'],
+            ]);
+        }
+
+        return $media;
+    }
+
+    private function firstValidationMessage(ValidationException $e): string
+    {
+        return collect($e->errors())->collapse()->first() ?? '操作失败';
+    }
+
+    /**
      * 从表单输入中提取真实列对应的属性（不包含 tags / cover_media_id）。
      *
      * @return array<string, mixed>
@@ -444,28 +592,29 @@ class HairstyleController extends AdminController
     {
         $publishedAt = $form->input('published_at');
 
+        // 同 handleSaving() 顶部注释：一律用 "input($key) ?? 默认值"，不使用 input($key, $default)。
         return [
             'category_id' => (int) $form->input('category_id'),
             'name' => (string) $form->input('name'),
-            'name_en' => (string) $form->input('name_en', ''),
+            'name_en' => (string) ($form->input('name_en') ?? ''),
             'slug' => (string) $form->input('slug'),
             'description' => $form->input('description'),
-            'gender' => (int) $form->input('gender', HairstyleGender::All->value),
-            'age_range' => (int) $form->input('age_range', HairstyleAgeRange::All->value),
-            'style_type' => (int) $form->input('style_type', HairstyleStyleType::Other->value),
-            'hair_length' => (int) $form->input('hair_length', HairstyleHairLength::Other->value),
-            'hair_type' => (int) $form->input('hair_type', HairstyleHairType::All->value),
-            'hair_volume' => (int) $form->input('hair_volume', HairstyleHairVolume::All->value),
+            'gender' => (int) ($form->input('gender') ?? HairstyleGender::All->value),
+            'age_range' => (int) ($form->input('age_range') ?? HairstyleAgeRange::All->value),
+            'style_type' => (int) ($form->input('style_type') ?? HairstyleStyleType::Other->value),
+            'hair_length' => (int) ($form->input('hair_length') ?? HairstyleHairLength::Other->value),
+            'hair_type' => (int) ($form->input('hair_type') ?? HairstyleHairType::All->value),
+            'hair_volume' => (int) ($form->input('hair_volume') ?? HairstyleHairVolume::All->value),
             'face_shape' => $faceShape !== [] ? $faceShape : null,
-            'maintenance_level' => (int) $form->input('maintenance_level', HairstyleMaintenanceLevel::Unknown->value),
+            'maintenance_level' => (int) ($form->input('maintenance_level') ?? HairstyleMaintenanceLevel::Unknown->value),
             'suitable_scene' => $suitableScene !== [] ? $suitableScene : null,
             'ai_prompt' => $form->input('ai_prompt'),
             'ai_negative_prompt' => $form->input('ai_negative_prompt'),
-            'seo_title' => (string) $form->input('seo_title', ''),
-            'seo_description' => (string) $form->input('seo_description', ''),
-            'status' => (int) $form->input('status', HairstyleStatus::Enabled->value),
+            'seo_title' => (string) ($form->input('seo_title') ?? ''),
+            'seo_description' => (string) ($form->input('seo_description') ?? ''),
+            'status' => (int) ($form->input('status') ?? HairstyleStatus::Enabled->value),
             'is_recommended' => $form->input('is_recommended') ? 1 : 0,
-            'sort' => (int) $form->input('sort', 0),
+            'sort' => (int) ($form->input('sort') ?? 0),
             'published_at' => $publishedAt !== '' && $publishedAt !== null ? $publishedAt : null,
         ];
     }
@@ -489,14 +638,53 @@ class HairstyleController extends AdminController
     }
 
     /**
-     * 构建“媒体管理”标签页：仅展示当前关联媒体的只读摘要，并给出跳转到
-     * HairstyleMediaController 的明确入口；真正的关联/主图/移除操作都在独立子页面完成，
-     * 全部通过 HairstyleMediaService 写入，本方法不写入任何数据。
+     * 构建“封面与媒体”标签页：
+     * - 顶部展示当前封面预览（新建时展示提示文案），并提供“上传新封面”“从媒体库选择封面”两个
+     *   虚拟字段（随主表单一起提交，在 handleSaving() 的同一个事务内处理，不直接绑定 cover_media_id）；
+     * - 编辑已有发型时，下方额外展示当前关联媒体的只读摘要，并给出跳转到 HairstyleMediaController
+     *   的明确入口，已关联媒体的“设为封面/编辑关联信息/移除关联”都在该独立子页面完成；
+     * - 新建发型时（$hairstyleId 为 null）还没有发型 ID，不展示"已关联媒体"面板，
+     *   但上传/选择封面字段与编辑页复用同一段定义，保存后会在 handleSaving() 的事务内一次性生效。
+     *
+     * @param  int|null  $hairstyleId  null 表示当前是新建发型
      */
-    private function buildMediaManagementTab(Form $form, int $hairstyleId): void
+    private function buildCoverAndMediaTab(Form $form, ?int $hairstyleId): void
     {
-        $form->tab('媒体管理', function (Form $form) use ($hairstyleId) {
-            $form->html(HairstyleController::renderMediaManagementPanel($hairstyleId));
+        $form->tab('封面与媒体', function (Form $form) use ($hairstyleId) {
+            $form->html(HairstyleController::renderCoverPreview($hairstyleId), '当前封面');
+
+            $form->image('cover_upload', '上传新封面')
+                ->disk('public')
+                ->dir(function () {
+                    return 'media/'.now()->format('Y/m/d');
+                })
+                ->name(function (UploadedFile $file) {
+                    $storedName = md5(uniqid('', true)).'.'.strtolower($file->getClientOriginalExtension() ?: 'jpg');
+
+                    Cache::put(
+                        HairstyleController::COVER_UPLOAD_META_CACHE_PREFIX.$storedName,
+                        ['original_name' => $file->getClientOriginalName()],
+                        now()->addMinutes(30)
+                    );
+
+                    return $storedName;
+                })
+                ->accept('jpg,jpeg,png,webp')
+                ->rules('mimes:jpg,jpeg,png,webp|mimetypes:image/jpeg,image/png,image/webp|max:'.MediaFileService::MAX_UPLOAD_SIZE_KB)
+                ->help($hairstyleId ? '留空表示不更换封面；上传成功后保存表单才会正式生效' : '新建发型时同样支持直接上传封面，保存成功后自动关联并设为封面');
+
+            $form->selectTable('cover_select_media_id', '从媒体库选择封面')
+                ->title('选择封面媒体')
+                ->dialogWidth('60%')
+                ->from(MediaImageTable::make())
+                ->pluck('original_name', 'id')
+                ->help('仅可选择状态为“启用”的图片类型媒体；同时上传了新文件时，以上传的文件优先');
+
+            $form->html(
+                $hairstyleId
+                    ? HairstyleController::renderMediaManagementPanel($hairstyleId)
+                    : '<div class="alert alert-info" style="margin-bottom:0;">新建发型保存成功后，可在编辑页继续管理已关联的媒体列表（关联更多媒体、编辑标题/排序、移除关联）。</div>'
+            );
         });
     }
 
@@ -570,6 +758,32 @@ HTML;
     <button type="submit" class="btn btn-link" style="padding:0;border:0;background:none;color:#dc3545;" title="永久删除"><i class="feather icon-trash-2"></i></button>
 </form>
 HTML;
+    }
+
+    /**
+     * “封面与媒体”标签页顶部的当前封面预览：缩略图 + 媒体 ID + 原始文件名；
+     * 新建发型（$hairstyleId 为 null）时还没有封面，展示明确的引导文案；
+     * 已有发型但尚未设置封面时展示"暂未设置封面"。
+     */
+    public static function renderCoverPreview(?int $hairstyleId): string
+    {
+        if (! $hairstyleId) {
+            return '<div class="alert alert-info" style="margin-bottom:0;">新建后将使用本次上传或选择的图片作为封面；如果都不设置，保存后可在编辑页补充</div>';
+        }
+
+        /** @var Hairstyle|null $hairstyle */
+        $hairstyle = Hairstyle::withTrashed()->with('coverMedia')->find($hairstyleId);
+        $cover = $hairstyle?->coverMedia;
+
+        if (! $cover) {
+            return '<div class="alert alert-warning" style="margin-bottom:0;">暂未设置封面</div>';
+        }
+
+        $src = $cover->thumbnail_url ?: $cover->url;
+        $img = $src ? '<img src="'.e($src).'" style="max-width:120px;max-height:120px;border-radius:4px;" />' : '-';
+
+        return $img
+            .'<div style="margin-top:6px;color:#666;">媒体 ID：#'.$cover->id.'　原始文件名：'.e($cover->original_name ?: $cover->filename).'</div>';
     }
 
     public static function renderMediaManageAction(Hairstyle $model): string

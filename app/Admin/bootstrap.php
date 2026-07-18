@@ -96,5 +96,12 @@ Admin::menu(function (\Dcat\Admin\Layout\Menu $menu) {
             'uri'       => 'media-files',
             'parent_id' => 8,
         ],
+        // 注意：发色模块（“发色中心/发色分类/发色管理”）的菜单不再通过本静态数组添加。
+        // 本次 Review 发现该数组渲染的是 Dcat 的 LEFT_SIDEBAR_MENU_BOTTOM 静态区块，
+        // 并不写入真正的 admin_menu 数据库表；继续在这里追加硬编码数字 id 存在随模块
+        // 增多产生 id 冲突的风险，也无法获得 Dcat 菜单管理/角色权限的原生支持。
+        // 发色模块菜单改为通过 database/seeders/HairColorAdminMenuSeeder.php 写入
+        // 真正的 admin_menu 表（按 title/uri 幂等查找，不使用任何硬编码 id），
+        // 该 Seeder 本次任务中不执行，需项目负责人评估后手动执行。
 ]);
 });

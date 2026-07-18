@@ -6,6 +6,8 @@ use App\Enums\Media\MediaFileType;
 use App\Enums\Media\MediaSourceType;
 use App\Enums\Media\MediaStatus;
 use App\Enums\Media\MediaVisibility;
+use App\Models\HairColor;
+use App\Models\HairColorCategory;
 use App\Models\Hairstyle;
 use App\Models\HairstyleCategory;
 use App\Models\HairstyleMedia;
@@ -435,6 +437,14 @@ class MediaFileService
 
         if (HairstyleCategory::query()->where('cover_media_id', $mediaId)->exists()) {
             $references[] = '发型分类封面（hairstyle_categories.cover_media_id）';
+        }
+
+        if (HairColor::query()->where('cover_media_id', $mediaId)->exists()) {
+            $references[] = '发色封面（hair_colors.cover_media_id）';
+        }
+
+        if (HairColorCategory::query()->where('cover_media_id', $mediaId)->exists()) {
+            $references[] = '发色分类封面（hair_color_categories.cover_media_id）';
         }
 
         if ($references !== []) {

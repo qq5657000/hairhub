@@ -6,6 +6,8 @@ use App\Enums\Media\MediaFileType;
 use App\Enums\Media\MediaSourceType;
 use App\Enums\Media\MediaStatus;
 use App\Enums\Media\MediaVisibility;
+use App\Models\HairColor;
+use App\Models\HairColorCategory;
 use App\Models\Hairstyle;
 use App\Models\HairstyleCategory;
 use App\Models\HairstyleMedia;
@@ -70,6 +72,16 @@ class MediaFileServiceTest extends TestCase
         return HairstyleCategory::create([
             'name' => 'test_category',
             'slug' => 'test-category-'.uniqid(),
+        ]);
+    }
+
+    private function makeHairColorCategory(): HairColorCategory
+    {
+        return HairColorCategory::create([
+            'parent_id' => 0,
+            'name' => 'test_hair_color_category',
+            'slug' => 'test-hair-color-category-'.uniqid(),
+            'status' => 1,
         ]);
     }
 
@@ -199,6 +211,45 @@ class MediaFileServiceTest extends TestCase
         $path = $this->putFakeImage('media/2026/07/15/'.uniqid().'.jpg');
         $media = $this->service->storeUploadedFile('public', $path, []);
         $category = $this->makeCategory();
+        $category->cover_media_id = $media->id;
+        $category->save();
+
+        $this->expectException(ValidationException::class);
+
+        $this->service->deleteMedia($media->id);
+    }
+
+    /**
+     * 发色模块（Phase 2 新增）：被 hair_colors.cover_media_id 引用的媒体不能删除。
+     */
+    public function test_delete_media_rejects_when_referenced_by_hair_color_cover(): void
+    {
+        $path = $this->putFakeImage('media/2026/07/15/'.uniqid().'.jpg');
+        $media = $this->service->storeUploadedFile('public', $path, []);
+        $category = $this->makeHairColorCategory();
+
+        HairColor::create([
+            'category_id' => $category->id,
+            'name' => 'test_hair_color',
+            'slug' => 'test-hair-color-'.uniqid(),
+            'color_hex' => '#123456',
+            'status' => 1,
+            'cover_media_id' => $media->id,
+        ]);
+
+        $this->expectException(ValidationException::class);
+
+        $this->service->deleteMedia($media->id);
+    }
+
+    /**
+     * 发色模块（Phase 2 新增）：被 hair_color_categories.cover_media_id 引用的媒体不能删除。
+     */
+    public function test_delete_media_rejects_when_referenced_by_hair_color_category_cover(): void
+    {
+        $path = $this->putFakeImage('media/2026/07/15/'.uniqid().'.jpg');
+        $media = $this->service->storeUploadedFile('public', $path, []);
+        $category = $this->makeHairColorCategory();
         $category->cover_media_id = $media->id;
         $category->save();
 

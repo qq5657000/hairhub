@@ -26,5 +26,14 @@ class DatabaseSeeder extends Seeder
             HairstyleTagSeeder::class,
             HairstyleSeeder::class,
         ]);
+
+        // 发色中心初始化数据（HairColorCategorySeeder / HairColorSeeder）不在此注册。
+        // 本次 Review 决定：数据库全局 Seeder 默认会在 `php artisan migrate:fresh --seed`
+        // 等场景被无差别执行，发色分类/发色数据属于长期运营资产，即使 Seeder 本身已经
+        // 做到“已存在记录不覆盖”，仍不希望它在无人明确决策的情况下被动触发。
+        // 需要初始化发色示例数据时，请显式单独执行：
+        //   php artisan db:seed --class=HairColorCategorySeeder
+        //   php artisan db:seed --class=HairColorSeeder
+        // （发色后台菜单 HairColorAdminMenuSeeder 同理，也不在此注册，见其类注释。）
     }
 }

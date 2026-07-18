@@ -39,6 +39,20 @@ Route::group([
     $router->resource('/hairstyle-categories', HairstyleCategoryController::class);
     $router->resource('/hairstyle-tags', HairstyleTagController::class);
 
+    # 发色中心
+    # cover-upload 与 resource() 生成的 GET /hair-color-categories/{id} 是同样的两段式路径，
+    # 必须注册在 resource() 之前，避免被 {id} 通配路由抢先匹配（原因见上方发型分类同类注释）。
+    # V1.0 发色模块只保留软删除和恢复，不提供永久删除路由（详见 Service/Controller 头部注释）。
+    $router->post('hair-color-categories/cover-upload', 'HairColorCategoryController@uploadCover');
+    $router->match(['put', 'patch'], 'hair-color-categories/cover-upload', 'HairColorCategoryController@uploadCover');
+    $router->resource('/hair-color-categories', HairColorCategoryController::class);
+    $router->put('hair-color-categories/{id}/restore', 'HairColorCategoryController@restore');
+
+    $router->post('hair-colors/cover-upload', 'HairColorController@uploadCover');
+    $router->match(['put', 'patch'], 'hair-colors/cover-upload', 'HairColorController@uploadCover');
+    $router->resource('/hair-colors', HairColorController::class);
+    $router->put('hair-colors/{id}/restore', 'HairColorController@restore');
+
     # 发型媒体关联管理（发型编辑页“媒体管理”标签页的独立子页面）
     # media-options 与 resource() 生成的 GET /hairstyle-media/{id} 是同样的两段式路径，
     # 必须注册在 resource() 之前，否则会被 {id} 通配路由抢先匹配。

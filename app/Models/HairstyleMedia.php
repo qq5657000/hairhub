@@ -2,10 +2,9 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
-class HairstyleMedia extends Model
+class HairstyleMedia extends BaseModel
 {
     protected $table = 'hairstyle_media';
 

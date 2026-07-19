@@ -2,10 +2,9 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
-class HairstyleTagRelation extends Model
+class HairstyleTagRelation extends BaseModel
 {
     /**
      * hairstyle_tag_relations 表只有 created_at 字段，没有 updated_at，

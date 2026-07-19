@@ -4,11 +4,10 @@ namespace App\Models;
 
 use App\Casts\SuitableSkinCast;
 use App\Support\ColorHex;
-use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
-class HairColor extends Model
+class HairColor extends BaseModel
 {
     use SoftDeletes;
 

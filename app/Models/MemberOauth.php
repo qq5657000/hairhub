@@ -75,6 +75,6 @@ class MemberOauth extends Model
     // 获取类型名称
     public function getTypeNameAttribute()
     {
-        return $this->type[$this->attributes['type'] ?? '未知';
+        return $this->type[$this->attributes['type']] ?? '未知';
     }
 }

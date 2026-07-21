@@ -38,4 +38,16 @@ enum CommonStatus: int
     {
         return array_column(self::cases(), 'value');
     }
+
+    /**
+     * 判断给定值是否为合法的 CommonStatus 取值。
+     *
+     * 内容模块（article_categories / article_tags）复用本枚举校验 status 字段，
+     * 补充该方法用于业务层合法性判断；纯新增静态方法，不影响既有调用方
+     * （发型分类、发色分类等模块的现有用法不受影响）。
+     */
+    public static function isValid(int $value): bool
+    {
+        return in_array($value, self::values(), true);
+    }
 }

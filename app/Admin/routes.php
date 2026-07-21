@@ -60,6 +60,41 @@ Route::group([
     $router->resource('/hairstyle-media', HairstyleMediaController::class);
     $router->put('hairstyle-media/{id}/set-primary', 'HairstyleMediaController@setPrimary');
 
+    # 内容中心
+    # cover-upload / media-options / *-options 均与 resource() 生成的 GET /xxx/{id} 是同样的
+    # 两段式路径，必须注册在 resource() 之前，避免被 {id} 通配路由抢先匹配（原因见上方
+    # 发型中心 hairstyles/cover-upload 的详细注释）；PUT/PATCH 同理需要补充注册。
+    $router->post('article-categories/cover-upload', 'ArticleCategoryController@uploadCover');
+    $router->match(['put', 'patch'], 'article-categories/cover-upload', 'ArticleCategoryController@uploadCover');
+    $router->resource('/article-categories', ArticleCategoryController::class);
+    $router->put('article-categories/{id}/restore', 'ArticleCategoryController@restore');
+
+    # article_tags 不使用 SoftDeletes（与 hairstyle_tags 一致），不提供回收站/恢复路由。
+    $router->resource('/article-tags', ArticleTagController::class);
+
+    $router->post('articles/cover-upload', 'ArticleController@uploadCover');
+    $router->match(['put', 'patch'], 'articles/cover-upload', 'ArticleController@uploadCover');
+    $router->post('articles/wechat-cover-upload', 'ArticleController@uploadWechatCover');
+    $router->match(['put', 'patch'], 'articles/wechat-cover-upload', 'ArticleController@uploadWechatCover');
+    $router->get('articles/hairstyle-options', 'ArticleController@hairstyleOptions');
+    $router->get('articles/hair-color-options', 'ArticleController@hairColorOptions');
+    $router->resource('/articles', ArticleController::class);
+    $router->put('articles/{id}/restore', 'ArticleController@restore');
+
+    # 文章媒体关联管理（文章编辑页“媒体与关联”标签页的独立子页面，详见该控制器头部注释）。
+    $router->get('article-media/media-options', 'ArticleMediaController@mediaOptions');
+    $router->resource('/article-media', ArticleMediaController::class);
+
+    $router->post('videos/cover-upload', 'VideoController@uploadCover');
+    $router->match(['put', 'patch'], 'videos/cover-upload', 'VideoController@uploadCover');
+    $router->resource('/videos', VideoController::class);
+    $router->put('videos/{id}/restore', 'VideoController@restore');
+
+    # 公众号同步状态：只读预留，只注册 index()/show() 两个只读入口，刻意不注册
+    # create/store/edit/update/destroy 对应的路由（详见该控制器头部注释）。
+    $router->get('wechat-articles', 'WechatArticleController@index');
+    $router->get('wechat-articles/{id}', 'WechatArticleController@show');
+
     # 媒体中心
     $router->resource('/media-files', MediaFileController::class);
 

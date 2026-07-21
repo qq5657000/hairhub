@@ -6,12 +6,16 @@ use App\Enums\Media\MediaFileType;
 use App\Enums\Media\MediaSourceType;
 use App\Enums\Media\MediaStatus;
 use App\Enums\Media\MediaVisibility;
+use App\Models\Article;
+use App\Models\ArticleCategory;
+use App\Models\ArticleMedia;
 use App\Models\HairColor;
 use App\Models\HairColorCategory;
 use App\Models\Hairstyle;
 use App\Models\HairstyleCategory;
 use App\Models\HairstyleMedia;
 use App\Models\MediaFile;
+use App\Models\Video;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
@@ -445,6 +449,34 @@ class MediaFileService
 
         if (HairColorCategory::query()->where('cover_media_id', $mediaId)->exists()) {
             $references[] = '发色分类封面（hair_color_categories.cover_media_id）';
+        }
+
+        // 内容模块（本次 Review 补充，Phase 1 遗留缺口）：文章分类封面、文章网站/公众号
+        // 封面、文章正文图片/图集/附件关联、视频封面与本地视频媒体均未纳入引用检查，
+        // 会导致在媒体资源页面直接删除仍被文章/视频引用的媒体后出现悬空引用
+        // （前台渲染出 404 图片/断链视频），因此在此处补充，不改变已有发型/发色模块的判断逻辑。
+        if (ArticleCategory::query()->where('cover_media_id', $mediaId)->exists()) {
+            $references[] = '文章分类封面（article_categories.cover_media_id）';
+        }
+
+        if (Article::query()->where('cover_media_id', $mediaId)->exists()) {
+            $references[] = '文章网站封面（articles.cover_media_id）';
+        }
+
+        if (Article::query()->where('wechat_cover_media_id', $mediaId)->exists()) {
+            $references[] = '文章公众号封面（articles.wechat_cover_media_id）';
+        }
+
+        if (ArticleMedia::query()->where('media_id', $mediaId)->exists()) {
+            $references[] = '文章正文图片/图集/附件（article_media）';
+        }
+
+        if (Video::query()->where('cover_media_id', $mediaId)->exists()) {
+            $references[] = '视频封面（videos.cover_media_id）';
+        }
+
+        if (Video::query()->where('video_media_id', $mediaId)->exists()) {
+            $references[] = '视频本地视频文件（videos.video_media_id）';
         }
 
         if ($references !== []) {

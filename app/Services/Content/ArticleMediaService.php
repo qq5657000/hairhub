@@ -10,6 +10,7 @@ use App\Models\ArticleMedia;
 use App\Models\MediaFile;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\ValidationException;
 
 /**
@@ -23,6 +24,10 @@ use Illuminate\Validation\ValidationException;
  *   uk_article_media_type 唯一索引，本 Service 在写入前先做业务层校验）；
  * - ContentImage / Gallery 类型要求关联的媒体必须是图片类型（MediaFileType::Image）；
  * - 关联/解除关联只操作 article_media 中间表，不删除 media_files 原始记录。
+ *
+ * syncContentImagesFromHtml() 是“正文编辑体验”任务新增的能力：文章保存后根据
+ * 正文 HTML 中实际引用的 <img> 标签反查媒体库，自动增量维护 ContentImage 类型
+ * 关联，运营人员不再需要手工在本 Service 对应的后台页面逐张关联正文图片。
  */
 class ArticleMediaService
 {
@@ -173,6 +178,181 @@ class ArticleMediaService
             }
 
             return $relations;
+        });
+    }
+
+    /**
+     * 根据文章正文（网站正文 + 公众号正文）实际引用的 <img> 标签，增量同步该文章
+     * ContentImage 类型的 article_media 关联（对应“正文编辑体验”任务六）。
+     *
+     * 背景：Dcat-Plus 自带 TinyMCE 的 Editor::imageUrl() 只支持“上传成功后由前端
+     * 自动把返回的 location 插入为 <img src>”这一种简单模式，没有暴露自定义
+     * images_upload_handler 回调，无法在插入的 <img> 标签上可靠地附加
+     * data-media-id 属性（若要实现需要覆盖 TinyMCE 初始化选项写一段自定义上传逻辑，
+     * 属于不必要的前端 hack）。因此本方法改为“URL 精确匹配 media_files.storage+path”
+     * 的方式反查 media_id，而不依赖 data-media-id。
+     *
+     * 规则：
+     * - 只新增/移除关联关系，不触碰 media_files 表，也不会删除任何原始文件；
+     * - 已存在且仍被正文引用的关联保持不变，不重置 alt_text/caption/sort
+     *   （避免覆盖运营人员在“媒体与关联”页面手工维护的信息）；
+     * - 不再被任一正文引用的历史 ContentImage 关联会被移除；
+     * - 正文中引用了不存在/已被禁用/非图片类型的媒体地址时静默跳过，不阻断文章保存
+     *   （常见于历史脏数据或并发场景，不应因为一张失效图片导致整篇文章保存失败）。
+     *
+     * @param  array<int, string>  $htmlContents  需要扫描的正文 HTML 原文（网站正文、公众号正文）
+     */
+    public function syncContentImagesFromHtml(int $articleId, array $htmlContents): void
+    {
+        $mediaIds = [];
+
+        foreach ($htmlContents as $html) {
+            foreach ($this->extractImageSrcList((string) $html) as $src) {
+                $mediaId = $this->resolveMediaIdFromUrl($src);
+
+                if ($mediaId !== null && ! in_array($mediaId, $mediaIds, true)) {
+                    $mediaIds[] = $mediaId;
+                }
+            }
+        }
+
+        $this->syncContentImageReferences($articleId, $mediaIds);
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function extractImageSrcList(string $html): array
+    {
+        if (trim($html) === '') {
+            return [];
+        }
+
+        libxml_use_internal_errors(true);
+
+        $dom = new \DOMDocument('1.0', 'UTF-8');
+        $loaded = @$dom->loadHTML(
+            '<?xml encoding="UTF-8">'.$html,
+            LIBXML_NOERROR | LIBXML_NOWARNING | LIBXML_HTML_NODEFDTD | LIBXML_HTML_NOIMPLIED
+        );
+        libxml_clear_errors();
+
+        if (! $loaded) {
+            return [];
+        }
+
+        $srcList = [];
+
+        foreach ($dom->getElementsByTagName('img') as $img) {
+            $src = trim($img->getAttribute('src'));
+
+            if ($src !== '') {
+                $srcList[] = $src;
+            }
+        }
+
+        return $srcList;
+    }
+
+    /**
+     * 通过 media_files.storage + path 精确反查 media_id：项目媒体统一使用 'public'
+     * 磁盘（对应 MediaFileService::storeFromUploadedFile() 的固定入参），
+     * Storage::disk('public')->url('') 与 MediaFile::getUrlAttribute() 使用同一套
+     * 拼接规则（rtrim($configUrl,'/').'/'.ltrim($path,'/')），因此可以反向剥离前缀
+     * 还原出 path 再做精确匹配，不依赖任何正则猜测 URL 结构。
+     */
+    private function resolveMediaIdFromUrl(string $src): ?int
+    {
+        $src = trim($src);
+
+        if ($src === '') {
+            return null;
+        }
+
+        $prefix = Storage::disk('public')->url('');
+
+        if (! str_starts_with($src, $prefix)) {
+            return null;
+        }
+
+        $path = ltrim(substr($src, strlen($prefix)), '/');
+
+        if ($path === '') {
+            return null;
+        }
+
+        /** @var MediaFile|null $media */
+        $media = MediaFile::query()
+            ->where('storage', 'public')
+            ->where('path', $path)
+            ->where('file_type', MediaFileType::Image->value)
+            ->where('status', MediaStatus::Active->value)
+            ->first();
+
+        return $media?->id;
+    }
+
+    /**
+     * 增量同步 ContentImage 类型关联：新增缺失的、移除多余的，保留仍然有效的关联记录不变。
+     *
+     * @param  array<int, int>  $mediaIds  按正文中出现顺序去重后的图片媒体 ID
+     *
+     * @throws ModelNotFoundException 文章不存在
+     */
+    private function syncContentImageReferences(int $articleId, array $mediaIds): void
+    {
+        DB::transaction(function () use ($articleId, $mediaIds) {
+            $article = $this->lockArticle($articleId);
+
+            $mediaIds = array_values(array_unique(array_map('intval', $mediaIds)));
+
+            $currentIds = ArticleMedia::query()
+                ->where('article_id', $article->id)
+                ->where('media_type', ArticleMediaType::ContentImage->value)
+                ->pluck('media_id')
+                ->all();
+
+            $toDetach = array_diff($currentIds, $mediaIds);
+
+            if ($toDetach !== []) {
+                ArticleMedia::query()
+                    ->where('article_id', $article->id)
+                    ->where('media_type', ArticleMediaType::ContentImage->value)
+                    ->whereIn('media_id', $toDetach)
+                    ->delete();
+            }
+
+            foreach (array_values($mediaIds) as $index => $mediaId) {
+                /** @var ArticleMedia|null $relation */
+                $relation = ArticleMedia::query()
+                    ->where('article_id', $article->id)
+                    ->where('media_id', $mediaId)
+                    ->where('media_type', ArticleMediaType::ContentImage->value)
+                    ->first();
+
+                if ($relation) {
+                    if ((int) $relation->sort !== $index) {
+                        $relation->sort = $index;
+                        $relation->save();
+                    }
+
+                    continue;
+                }
+
+                try {
+                    $this->findUsableMedia($mediaId, ArticleMediaType::ContentImage);
+                } catch (ModelNotFoundException|ValidationException) {
+                    // 正文引用的图片地址已不可用（被删除/禁用/并发变更），静默跳过，不阻断文章保存。
+                    continue;
+                }
+
+                ArticleMedia::create([
+                    'article_id' => $article->id,
+                    'media_id' => $mediaId,
+                    'media_type' => ArticleMediaType::ContentImage->value,
+                    'sort' => $index,
+                ]);
+            }
         });
     }
 

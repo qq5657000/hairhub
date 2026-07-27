@@ -18,22 +18,26 @@ use Illuminate\Http\Request;
 use Illuminate\Validation\ValidationException;
 
 /**
- * 文章媒体关联管理（文章编辑页“媒体与关联”标签页中“正文图片管理”的独立子页面入口）。
+ * 文章媒体关联管理（文章编辑页“媒体与关联”标签页中“图集 / 附件 / 正文图片关联管理”
+ * 的独立子页面入口）。
  *
- * 背景（对应本次任务五.4“媒体与关联”要求）：项目已安装的富文本/Markdown 编辑器
- * （editor.md / TinyMCE，见 vendor/dcat-plus/laravel-admin/src/Form/Field/
- * Markdown.php、Editor.php）自带的“插入图片”按钮默认走各自独立的通用上传接口
- * （editor-md.upload / tinymce.upload），并不会把图片登记进 media_files、也不会
- * 建立 article_media 关联，与项目“所有图片必须统一由 MediaService 管理”的原则冲突；
- * 若要改造编辑器的原生上传按钮直接对接媒体库，需要精确匹配这两个第三方编辑器各自
- * 的上传响应 JSON 格式，本阶段无法通过真实浏览器验证该改造的正确性，风险较高。
+ * 角色说明（“正文编辑体验”任务后已更新）：网站正文 / 公众号正文已改为直接使用
+ * Dcat-Plus 自带 TinyMCE（见 ArticleController::editorImageUpload()），运营人员
+ * 在正文编辑器里点击“图片”按钮上传即可，图片会实时登记进 media_files；文章保存
+ * 成功后 ArticleMediaService::syncContentImagesFromHtml() 会自动解析正文中的
+ * <img> 标签并增量同步 ContentImage 类型的 article_media 关联，不再需要运营人员
+ * 先来本页面手工关联/上传图片再复制地址粘贴回正文。
  *
- * 因此按照任务说明的兼容方案：不改造编辑器原生插图按钮，而是在文章表单“媒体与关联”
- * 标签页提供一个独立的“正文图片管理”入口（本控制器），运营人员在此关联/上传图片后，
- * 复制预览区展示的图片地址，手工粘贴到正文编辑器中；本页面完整复用已验证可用的
- * HairstyleMediaController 交互模式（关联媒体 / 编辑 ALT・说明・排序 / 移除关联），
- * 所有会影响 article_media 一致性的写操作全部委托给 ArticleMediaService，
- * 不在本控制器或 Form 回调中重复实现校验逻辑。
+ * 本控制器现在的职责：
+ * - 查看正文图片（ContentImage）自动同步的关联结果；
+ * - 管理图集（Gallery）、附件（Attachment）——这两类用途没有对应的富文本编辑器
+ *   入口，仍然需要在本页面手工关联/上传；
+ * - 修改任意关联记录的 ALT 文本、说明（caption）、排序；
+ * - 手动补充或移除关联（移除只删除 article_media 记录，不删除 media_files 原始文件）。
+ *
+ * 交互模式复用已验证可用的 HairstyleMediaController，所有会影响 article_media
+ * 一致性的写操作全部委托给 ArticleMediaService，不在本控制器或 Form 回调中重复
+ * 实现校验逻辑。
  *
  * 访问方式：/admin/article-media?article_id={文章ID}（通过文章编辑页“媒体与关联”
  * 标签页跳转）。
@@ -51,7 +55,7 @@ class ArticleMediaController extends AdminController
     {
         return $content
             ->header('文章媒体管理')
-            ->description('正文图片 / 图集 / 附件关联 / 编辑 / 移除')
+            ->description('查看正文图片自动同步结果 / 管理图集与附件 / 编辑 ALT・说明・排序 / 移除关联')
             ->body($this->grid());
     }
 
@@ -184,7 +188,7 @@ class ArticleMediaController extends AdminController
 
             if ($existing?->media) {
                 $preview = ArticleMediaController::renderMediaUrlHint($existing->media);
-                $form->html($preview, '图片地址（可复制粘贴到正文编辑器中引用）');
+                $form->html($preview, '图片访问地址');
             }
 
             $form->saving(function (Form $form) use ($self) {
@@ -347,8 +351,8 @@ class ArticleMediaController extends AdminController
     }
 
     /**
-     * 编辑页展示图片完整访问地址，供运营人员复制后手工粘贴到正文编辑器中引用
-     * （对应编辑器原生插图按钮未对接媒体库的兼容方案，详见类头部注释）。
+     * 编辑页展示图片完整访问地址，供需要在图集/附件等场景之外核对或引用地址时查看，
+     * 正文图片本身已不再需要经由本页面手工复制粘贴（详见类头部注释）。
      */
     public static function renderMediaUrlHint(MediaFile $media): string
     {
@@ -359,6 +363,6 @@ class ArticleMediaController extends AdminController
         }
 
         return '<input type="text" readonly value="'.e($url).'" class="form-control" onclick="this.select();" style="max-width:520px;" />'
-            .'<div style="margin-top:4px;color:#666;">点击选中后复制，粘贴到正文编辑器中即可引用该图片</div>';
+            .'<div style="margin-top:4px;color:#666;">点击选中后复制，可用于核对地址或其他手工引用场景</div>';
     }
 }

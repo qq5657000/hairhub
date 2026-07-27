@@ -17,6 +17,7 @@ use App\Models\Article;
 use App\Models\HairColor;
 use App\Models\Hairstyle;
 use App\Models\MediaFile;
+use App\Services\Content\ArticleMediaService;
 use App\Services\Content\ArticleService;
 use App\Services\Media\MediaFileService;
 use Dcat\Admin\Admin;
@@ -40,9 +41,17 @@ use Illuminate\Validation\ValidationException;
  * 发色关联同步、公众号预留记录维护全部委托给 Service，本控制器只负责表单字段提取、
  * 封面媒体解析（复用 ManagesCoverMedia trait）和事务边界控制。
  *
- * 正文图片/图集/附件的关联管理委托给独立的 ArticleMediaController 子页面（详见该
- * 控制器头部注释关于编辑器插图能力限制的说明），本表单“媒体与关联”标签页只提供
- * 入口链接，不重复实现媒体关联的增删改逻辑。
+ * 网站正文/公众号正文统一使用 Dcat-Plus 自带 TinyMCE（$form->editor()）编辑，
+ * 图片通过 editorImageUpload() 直接上传并登记进 media_files，文章保存成功后由
+ * ArticleMediaService::syncContentImagesFromHtml() 自动增量同步 article_media
+ * 中 ContentImage 类型的关联，运营人员不再需要先在“媒体与关联”页面上传图片、
+ * 复制 URL 再手工粘贴回正文。“媒体与关联”标签页仍保留，但职责调整为查看/管理
+ * 图集、附件、ALT、说明、排序，不再是写正文前的必经步骤（详见
+ * ArticleMediaController 头部注释）。
+ *
+ * content_format 字段继续保留在数据库和 ArticleService 中，但后台表单不再提供
+ * 选择下拉框：创建/保存文章时统一固定写入 ContentFormat::Html->value（见
+ * handleSaving()），避免“选项存在但从未真正生效”的名不副实问题。
  *
  * saving()/deleting() 回调始终返回非空 JsonResponse，短路 Dcat 默认的
  * store()/update()/destroy() 持久化流程，确保“保存/删除”只有 Service 这一个
@@ -55,11 +64,17 @@ class ArticleController extends AdminController
 
     private ArticleService $articleService;
 
+    private ArticleMediaService $articleMediaService;
+
     private MediaFileService $mediaFileService;
 
-    public function __construct(ArticleService $articleService, MediaFileService $mediaFileService)
-    {
+    public function __construct(
+        ArticleService $articleService,
+        ArticleMediaService $articleMediaService,
+        MediaFileService $mediaFileService
+    ) {
         $this->articleService = $articleService;
+        $this->articleMediaService = $articleMediaService;
         $this->mediaFileService = $mediaFileService;
     }
 
@@ -291,17 +306,14 @@ class ArticleController extends AdminController
             });
 
             $form->tab('网站正文', function (Form $form) {
-                $form->select('content_format', '正文格式')
-                    ->options(ContentFormat::options())
-                    ->default(ContentFormat::Markdown->value)
-                    ->required();
-
-                $form->markdown('content', '网站正文')
-                    ->options(['imageUpload' => false, 'saveHTMLToTextarea' => false])
+                $form->editor('content', '网站正文')
+                    ->height(650)
+                    ->imageUrl('articles/editor-image')
                     ->help(
-                        '已关闭编辑器自带的“插入图片”上传按钮（该按钮默认走独立上传接口，不会登记进媒体库，'.
-                        '与项目“图片必须统一由媒体服务管理”的原则冲突）；请先在“媒体与关联”标签页的'.
-                        '“正文图片 / 图集 / 附件管理”中关联或上传图片，复制预览区展示的图片地址后手工粘贴到此处引用；'.
+                        '支持标题、加粗、列表、链接、图片、表格、HTML 源码、全屏等富文本编辑；'.
+                        '点击工具栏“图片”按钮上传的图片会直接登记进媒体库（media_files），'.
+                        '保存文章后系统会自动根据正文实际引用的图片同步“媒体与关联”中的正文图片关联，'.
+                        '无需手工操作；正文格式固定保存为 HTML（content_format 字段由系统自动维护）；'.
                         '发布前必须保证本字段非空'
                     );
             });
@@ -322,9 +334,13 @@ class ArticleController extends AdminController
                     '公众号封面'
                 );
 
-                $form->markdown('wechat_content', '公众号正文')
-                    ->options(['imageUpload' => false, 'saveHTMLToTextarea' => false])
-                    ->help('与网站正文独立保存，互不覆盖；图片上传按钮已关闭，原因与网站正文一致。本阶段不实现真实公众号同步');
+                $form->editor('wechat_content', '公众号正文')
+                    ->height(650)
+                    ->imageUrl('articles/editor-image')
+                    ->help(
+                        '与网站正文独立保存、互不覆盖；图片上传方式与网站正文一致，直接登记进媒体库；'.
+                        '本阶段仍不实现真实公众号同步'
+                    );
             });
 
             $form->tab('媒体与关联', function (Form $form) use ($id) {
@@ -434,6 +450,33 @@ class ArticleController extends AdminController
                 'wechat_cover_upload', 'wechat_cover_select_media_id', 'wechat_clear_cover',
             ]);
 
+            // TinyMCE 初始化时若所在 Tab 处于 display:none（“网站正文”“公众号内容”不是默认激活的
+            // 第一个 Tab），会按 0 宽度计算工具栏布局，导致切换过去后工具栏换行/挤压；
+            // TinyMCE 本身不需要“先点击才能输入”（这是此前 Markdown 编辑器特有的问题），
+            // 这里只做最小修复：Tab 切换完成后触发一次 resize，让 TinyMCE 的 autoresize
+            // 插件和响应式工具栏重新计算布局。
+            Admin::script(<<<'JS'
+(function () {
+    function refreshVisibleEditors() {
+        window.dispatchEvent(new Event('resize'));
+
+        if (window.tinymce && tinymce.editors) {
+            tinymce.editors.forEach(function (ed) {
+                try {
+                    ed.execCommand('mceAutoResize');
+                } catch (e) {}
+            });
+        }
+    }
+
+    $(document).off('shown.bs.tab.articleEditorResize')
+        .on('shown.bs.tab.articleEditorResize', 'a[data-toggle="tab"]', function () {
+            setTimeout(refreshVisibleEditors, 50);
+        });
+})();
+JS
+            );
+
             $form->saving(function (Form $form) use ($self) {
                 return $self->handleSaving($form);
             });
@@ -479,6 +522,57 @@ class ArticleController extends AdminController
     public function uploadWechatCover()
     {
         return $this->handleGenericCoverUpload('wechat_cover_upload');
+    }
+
+    /**
+     * 网站正文 / 公众号正文 TinyMCE 编辑器的图片上传接口（对应 $form->editor()->imageUrl()）。
+     *
+     * 路由已注册在 app/Admin/routes.php 的 admin 中间件分组内，与其余后台接口共用
+     * config('admin.route.middleware')（web + admin），即已经过登录态校验，未登录管理员
+     * 无法访问；请求本身由 Dcat\Admin\Form\Field\Editor::formatUrl() 统一拼接
+     * _token（CSRF）/disk/dir 查询参数，本方法固定使用 'public' 磁盘和按日期分目录，
+     * 不依赖前端传入的 disk/dir，避免被篡改。
+     *
+     * 返回格式严格遵循 TinyMCE images_upload_url 约定：成功时 {"location": "URL"}，
+     * 失败时非 2xx 状态码 + {"message": "错误信息"}（与 Dcat 自带
+     * Dcat\Admin\Http\Controllers\TinymceController::upload() 的约定保持一致，
+     * 只是把落盘 + 登记逻辑替换为项目统一的 MediaFileService，不直接写 public/uploads，
+     * 不接受 Base64，图片会实际登记进 media_files，source_type 记为 Article）。
+     */
+    public function editorImageUpload()
+    {
+        $file = request()->file('file');
+
+        if (! $file) {
+            return response()->json(['message' => '未接收到上传文件'], 422);
+        }
+
+        $validator = Validator::make(
+            ['file' => $file],
+            ['file' => 'required|image|mimes:jpg,jpeg,png,webp|mimetypes:image/jpeg,image/png,image/webp|max:'.MediaFileService::MAX_UPLOAD_SIZE_KB]
+        );
+
+        if ($validator->fails()) {
+            return response()->json(['message' => $validator->errors()->first()], 422);
+        }
+
+        try {
+            $media = $this->mediaFileService->storeFromUploadedFile($file, 'public', 'media/'.now()->format('Y/m/d'), [
+                'source_type' => MediaSourceType::Article->value,
+                'visibility' => MediaVisibility::Public->value,
+                'status' => MediaStatus::Active->value,
+            ]);
+        } catch (ValidationException $e) {
+            return response()->json(['message' => $this->firstValidationMessage($e)], 422);
+        } catch (\Throwable $e) {
+            report($e);
+
+            return response()->json([
+                'message' => config('app.debug') ? ('图片上传失败：'.$e->getMessage()) : '图片上传失败，请稍后重试',
+            ], 500);
+        }
+
+        return response()->json(['location' => $media->url]);
     }
 
     /**
@@ -640,7 +734,10 @@ class ArticleController extends AdminController
             'source' => (string) ($form->input('source') ?? ''),
             'source_url' => (string) ($form->input('source_url') ?? ''),
             'summary' => (string) ($form->input('summary') ?? ''),
-            'content_format' => (int) ($form->input('content_format') ?? ContentFormat::Markdown->value),
+            // 后台不再提供 Markdown / HTML 选择下拉框：正文统一使用 TinyMCE 编辑，
+            // 创建/保存时固定写入 Html，避免“选项存在但从未真正生效”的名不副实问题
+            // （ArticleService/ContentFormat 枚举本身仍完整保留 Markdown 支持，不受影响）。
+            'content_format' => ContentFormat::Html->value,
             'content' => (string) ($form->input('content') ?? ''),
             'wechat_excerpt' => (string) ($form->input('wechat_excerpt') ?? ''),
             'wechat_content' => (string) ($form->input('wechat_content') ?? ''),
@@ -705,13 +802,25 @@ class ArticleController extends AdminController
                         ]);
                     }
 
+                    $this->articleMediaService->syncContentImagesFromHtml($article->id, [
+                        (string) $article->content,
+                        (string) $article->wechat_content,
+                    ]);
+
                     return $article;
                 }
 
                 $attributes['cover_media_id'] = $this->resolveCoverMediaId($coverUploadId, $coverSelectId, $clearCover, 0);
                 $attributes['wechat_cover_media_id'] = $this->resolveCoverMediaId($wechatCoverUploadId, $wechatCoverSelectId, $wechatClearCover, 0);
 
-                return $this->articleService->create($attributes, $tagIds, $hairstyleIds, $hairColorIds);
+                $article = $this->articleService->create($attributes, $tagIds, $hairstyleIds, $hairColorIds);
+
+                $this->articleMediaService->syncContentImagesFromHtml($article->id, [
+                    (string) $article->content,
+                    (string) $article->wechat_content,
+                ]);
+
+                return $article;
             });
         } catch (ValidationException $e) {
             return JsonResponse::make()->error($this->firstValidationMessage($e));
@@ -725,7 +834,7 @@ class ArticleController extends AdminController
             );
         }
 
-        $response = JsonResponse::make()->success($id ? '更新成功' : '创建成功，请继续在“媒体与关联”标签页管理正文图片');
+        $response = JsonResponse::make()->success($id ? '更新成功' : '创建成功');
 
         return $id
             ? $response->refresh()
@@ -816,16 +925,22 @@ class ArticleController extends AdminController
     }
 
     /**
-     * “正文图片 / 图集 / 附件管理”入口面板：跳转到 ArticleMediaController 子页面，
-     * 不在本表单内重复实现媒体关联的增删改逻辑。
+     * “图集 / 附件管理”入口面板：跳转到 ArticleMediaController 子页面，不在本表单内
+     * 重复实现媒体关联的增删改逻辑。
+     *
+     * 正文图片（ContentImage）本身已改为在“网站正文”“公众号内容”标签页直接通过
+     * TinyMCE 上传并自动同步关联（见 ArticleController 头部注释），本面板不再是
+     * 写正文前的必经步骤，主要用于查看正文图片关联结果、维护图集/附件、修改
+     * ALT/说明/排序，以及手动补充媒体。
      */
     public static function renderMediaManagementPanel(int $articleId): string
     {
         $url = admin_url('article-media?article_id='.$articleId);
 
         return '<a href="'.e($url).'" target="_blank" class="btn btn-primary">'.
-            '<i class="feather icon-image"></i> 进入正文图片 / 图集 / 附件管理</a>'.
-            '<div style="margin-top:6px;color:#666;">在新页面中关联/上传图片、设置 ALT 文本和说明、排序或移除关联；'.
+            '<i class="feather icon-image"></i> 进入图集 / 附件 / 正文图片关联管理</a>'.
+            '<div style="margin-top:6px;color:#666;">正文中通过编辑器上传的图片会在保存文章后自动出现在这里；'.
+            '本页面用于查看关联结果、管理图集/附件、设置 ALT 文本和说明、排序或手动补充/移除关联；'.
             '移除关联不会删除媒体库中的原始文件。</div>';
     }
 

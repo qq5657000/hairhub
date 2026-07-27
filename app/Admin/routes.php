@@ -76,6 +76,9 @@ Route::group([
     $router->match(['put', 'patch'], 'articles/cover-upload', 'ArticleController@uploadCover');
     $router->post('articles/wechat-cover-upload', 'ArticleController@uploadWechatCover');
     $router->match(['put', 'patch'], 'articles/wechat-cover-upload', 'ArticleController@uploadWechatCover');
+    # 网站正文 / 公众号正文 TinyMCE 编辑器图片上传接口（$form->editor()->imageUrl()），
+    # 同样是与 resource() 生成的 GET /articles/{id} 同层级的两段式路径，必须注册在前面。
+    $router->post('articles/editor-image', 'ArticleController@editorImageUpload');
     $router->get('articles/hairstyle-options', 'ArticleController@hairstyleOptions');
     $router->get('articles/hair-color-options', 'ArticleController@hairColorOptions');
     $router->resource('/articles', ArticleController::class);

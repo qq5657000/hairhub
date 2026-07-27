@@ -109,6 +109,11 @@ class ArticleService
             $this->assertOptionalMediaUsable($attributes, 'cover_media_id');
             $this->assertOptionalMediaUsable($attributes, 'wechat_cover_media_id');
 
+            $attributes = $this->sanitizeHtmlContentFields(
+                $attributes,
+                (int) ($attributes['content_format'] ?? ContentFormat::Markdown->value)
+            );
+
             $attributes['status'] = ContentStatus::Draft->value;
 
             /** @var Article $article */
@@ -165,6 +170,13 @@ class ArticleService
 
             $this->assertOptionalMediaUsable($attributes, 'cover_media_id');
             $this->assertOptionalMediaUsable($attributes, 'wechat_cover_media_id');
+
+            $attributes = $this->sanitizeHtmlContentFields(
+                $attributes,
+                array_key_exists('content_format', $attributes)
+                    ? (int) $attributes['content_format']
+                    : (int) $article->content_format->value
+            );
 
             $article->fill($attributes);
             $article->save();
@@ -782,5 +794,110 @@ class ArticleService
     private function filterWritableAttributes(array $data): array
     {
         return array_intersect_key($data, array_flip(self::WRITABLE_ATTRIBUTES));
+    }
+
+    /**
+     * 正文安全处理（对应本次“正文编辑体验”任务十、安全要求）。
+     *
+     * 后台正文已统一改为 TinyMCE 富文本（ContentFormat::Html），存在 XSS 风险，
+     * 因此仅当有效格式为 Html 时才对 content / wechat_content 做清洗；
+     * 格式仍为 Markdown 时不做任何处理，避免破坏 Markdown 语法（历史数据兼容）。
+     *
+     * 项目当前未引入任何 HTML Sanitizer 依赖（HTMLPurifier / league-html-sanitizer 等），
+     * 本方法只是基于 PHP 内置 DOMDocument 的最小防护，只做三件事：删除 <script>/<iframe>、
+     * 删除所有 on* 事件属性、清除 href/src 中的 javascript: 伪协议；不做任何标签/属性白名单
+     * 意义上的完整清洗，不能替代正式的 HTML Sanitizer——后续必须评估引入正式方案。
+     *
+     * @param  array<string, mixed>  $attributes
+     * @return array<string, mixed>
+     */
+    private function sanitizeHtmlContentFields(array $attributes, int $effectiveFormat): array
+    {
+        if ($effectiveFormat !== ContentFormat::Html->value) {
+            return $attributes;
+        }
+
+        foreach (['content', 'wechat_content'] as $field) {
+            if (array_key_exists($field, $attributes)) {
+                $attributes[$field] = $this->sanitizeHtml((string) $attributes[$field]);
+            }
+        }
+
+        return $attributes;
+    }
+
+    private function sanitizeHtml(string $html): string
+    {
+        $html = trim($html);
+
+        if ($html === '') {
+            return $html;
+        }
+
+        libxml_use_internal_errors(true);
+
+        $dom = new \DOMDocument('1.0', 'UTF-8');
+        // 用 <?xml encoding="UTF-8"> 前缀避免 loadHTML() 把中文按 ISO-8859-1 误解析；
+        // 包一层带唯一 id 的 div，避免 DOMDocument 对多个顶层兄弟节点的处理异常。
+        $wrapped = '<?xml encoding="UTF-8"><div id="__article_content_root__">'.$html.'</div>';
+        $loaded = @$dom->loadHTML(
+            $wrapped,
+            LIBXML_NOERROR | LIBXML_NOWARNING | LIBXML_HTML_NODEFDTD | LIBXML_HTML_NOIMPLIED
+        );
+        libxml_clear_errors();
+
+        if (! $loaded) {
+            // 解析失败时保留原文：宁可暂不清洗，也不能把无法解析的正文误清空。
+            return $html;
+        }
+
+        $xpath = new \DOMXPath($dom);
+        $root = $xpath->query('//div[@id="__article_content_root__"]')->item(0);
+
+        if (! $root) {
+            return $html;
+        }
+
+        $this->stripDangerousHtmlNodes($dom);
+
+        $inner = '';
+
+        foreach (iterator_to_array($root->childNodes) as $child) {
+            $inner .= (string) $dom->saveHTML($child);
+        }
+
+        return $inner;
+    }
+
+    private function stripDangerousHtmlNodes(\DOMDocument $dom): void
+    {
+        // 禁止的标签：script、iframe（项目暂无可信 iframe 白名单，本次一律禁止）。
+        foreach (['script', 'iframe'] as $tagName) {
+            foreach (iterator_to_array($dom->getElementsByTagName($tagName)) as $node) {
+                $node->parentNode?->removeChild($node);
+            }
+        }
+
+        $xpath = new \DOMXPath($dom);
+
+        foreach ($xpath->query('//*[@*]') as $element) {
+            if (! $element instanceof \DOMElement) {
+                continue;
+            }
+
+            foreach (iterator_to_array($element->attributes) as $attribute) {
+                $name = strtolower($attribute->name);
+
+                if (str_starts_with($name, 'on')) {
+                    $element->removeAttribute($attribute->name);
+
+                    continue;
+                }
+
+                if (in_array($name, ['href', 'src'], true) && preg_match('/^\s*javascript:/i', $attribute->value)) {
+                    $element->removeAttribute($attribute->name);
+                }
+            }
+        }
     }
 }

@@ -455,18 +455,56 @@ class ArticleCategoryController extends AdminController
      */
     public static function articleFormOptions(): array
     {
-        return ArticleCategory::query()
-            ->orderBy('parent_id')
+        $categories = ArticleCategory::query()
+            ->select([
+                'id',
+                'parent_id',
+                'name',
+                'status',
+                'sort',
+            ])
             ->orderByDesc('sort')
-            ->orderByDesc('id')
-            ->get(['id', 'name', 'parent_id', 'status'])
-            ->mapWithKeys(function (ArticleCategory $category) {
-                $prefix = (int) $category->parent_id !== 0 ? '　└ ' : '';
-                $suffix = (int) $category->status === CommonStatus::Enabled->value ? '' : '（已禁用）';
+            ->orderBy('id')
+            ->get();
 
-                return [$category->id => $prefix.$category->name.$suffix];
-            })
-            ->all();
+        $parents = $categories->where('parent_id', 0);
+
+        $childrenByParent = $categories
+            ->where('parent_id', '>', 0)
+            ->groupBy('parent_id');
+
+        $options = [];
+
+        foreach ($parents as $parent) {
+            $options[$parent->id] = self::formatArticleCategoryOption($parent);
+
+            $children = $childrenByParent
+                ->get($parent->id, collect())
+                ->values();
+
+            foreach ($children as $index => $child) {
+                $prefix = $index === $children->count() - 1
+                    ? '　└─ '
+                    : '　├─ ';
+
+                $options[$child->id] =
+                    $prefix . self::formatArticleCategoryOption($child);
+            }
+        }
+
+        return $options;
+    }
+
+    private static function formatArticleCategoryOption(
+        ArticleCategory $category
+    ): string {
+        $label = $category->name;
+
+        if ((int) $category->status !== 1) {
+            $label .= ' [已禁用]';
+        }
+
+        return $label;
     }
 
     /**

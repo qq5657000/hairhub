@@ -112,9 +112,9 @@ class ArticleController extends AdminController
             $grid->column('tags', '标签')->display(function () {
                 return $this->tags->pluck('name')->implode('、') ?: '-';
             });
-            $grid->column('status', '状态')
-                ->using(ContentStatus::options())
-                ->label(ArticleController::enumColorMap(ContentStatus::class));
+            $grid->column('status', '状态')->display(function ($value) {
+                return ArticleController::enumBadge($value, ContentStatus::class);
+            });
             $grid->column('is_recommended', '推荐')->using([0 => '否', 1 => '是'])->label([0 => 'default', 1 => 'success']);
             $grid->column('is_top', '置顶')->using([0 => '否', 1 => '是'])->label([0 => 'default', 1 => 'danger']);
             $grid->column('author', '作者')->display(fn ($value) => $value ?: '-');
@@ -203,7 +203,9 @@ class ArticleController extends AdminController
                 return ArticleController::renderCoverPreview($article->coverMedia, '暂未设置网站封面');
             })->unescape();
             $show->field('summary', '网站摘要')->as(fn ($value) => $value ?: '-');
-            $show->field('content_format', '正文格式')->using(ContentFormat::options());
+            $show->field('content_format', '正文格式')->as(function ($value) {
+                return ArticleController::enumLabel($value, ContentFormat::class);
+            });
             $show->field('content', '网站正文')->as(function ($value) {
                 return ArticleController::renderTextPreview((string) $value);
             })->unescape();
@@ -231,7 +233,9 @@ class ArticleController extends AdminController
                 return '<a href="'.e($url).'" target="_blank">进入管理页面</a>';
             })->unescape();
 
-            $show->field('status', '状态')->using(ContentStatus::options());
+            $show->field('status', '状态')->as(function ($value) {
+                return ArticleController::enumLabel($value, ContentStatus::class);
+            });
             $show->field('is_recommended', '是否推荐')->using([0 => '否', 1 => '是']);
             $show->field('is_top', '是否置顶')->using([0 => '否', 1 => '是']);
             $show->field('sort', '排序');

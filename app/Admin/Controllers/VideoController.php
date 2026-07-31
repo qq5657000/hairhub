@@ -79,15 +79,15 @@ class VideoController extends AdminController
                 return VideoController::renderCoverThumb($this->coverMedia);
             });
             $grid->column('title', '标题');
-            $grid->column('source', '视频来源')
-                ->using(VideoSource::options())
-                ->label(VideoController::enumColorMap(VideoSource::class));
+            $grid->column('source', '视频来源')->display(function ($value) {
+                return VideoController::enumBadge($value, VideoSource::class);
+            });
             $grid->column('duration', '时长')->display(function ($value) {
                 return VideoController::formatDuration((int) $value);
             });
-            $grid->column('status', '状态')
-                ->using(ContentStatus::options())
-                ->label(VideoController::enumColorMap(ContentStatus::class));
+            $grid->column('status', '状态')->display(function ($value) {
+                return VideoController::enumBadge($value, ContentStatus::class);
+            });
             $grid->column('is_recommended', '推荐')->using([0 => '否', 1 => '是'])->label([0 => 'default', 1 => 'success']);
             $grid->column('view_count', '播放量')->sortable();
             $grid->column('like_count', '点赞量')->sortable();
@@ -143,7 +143,9 @@ class VideoController extends AdminController
             $show->field('cover_display', '封面')->as(function () use ($video) {
                 return VideoController::renderCoverPreview($video->coverMedia);
             })->unescape();
-            $show->field('source', '视频来源')->using(VideoSource::options());
+            $show->field('source', '视频来源')->as(function ($value) {
+                return VideoController::enumLabel($value, VideoSource::class);
+            });
             $show->field('video_media_display', '本地视频媒体')->as(function () use ($video) {
                 $media = $video->videoMedia;
 
@@ -160,7 +162,9 @@ class VideoController extends AdminController
             $show->field('transcript', '字幕 / 文稿')->as(function ($value) {
                 return ArticleController::renderTextPreview((string) $value);
             })->unescape();
-            $show->field('status', '状态')->using(ContentStatus::options());
+            $show->field('status', '状态')->as(function ($value) {
+                return VideoController::enumLabel($value, ContentStatus::class);
+            });
             $show->field('is_recommended', '是否推荐')->using([0 => '否', 1 => '是']);
             $show->field('sort', '排序');
             $show->field('published_at', '发布时间')->as(fn ($value) => $value ?: '-');

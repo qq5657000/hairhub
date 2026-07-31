@@ -66,12 +66,12 @@ class WechatArticleController extends AdminController
 
                 return '<a href="'.e($url).'" target="_blank">'.e($this->article->title).'</a>';
             });
-            $grid->column('sync_status', '同步状态')
-                ->using(WechatSyncStatus::options())
-                ->label(WechatArticleController::enumColorMap(WechatSyncStatus::class));
-            $grid->column('publish_status', '发布状态')
-                ->using(WechatPublishStatus::options())
-                ->label(WechatArticleController::enumColorMap(WechatPublishStatus::class));
+            $grid->column('sync_status', '同步状态')->display(function ($value) {
+                return WechatArticleController::enumBadge($value, WechatSyncStatus::class);
+            });
+            $grid->column('publish_status', '发布状态')->display(function ($value) {
+                return WechatArticleController::enumBadge($value, WechatPublishStatus::class);
+            });
             $grid->column('wechat_media_id', '微信素材 ID')->display(fn ($value) => $value ?: '-');
             $grid->column('wechat_article_id', '微信文章 ID')->display(fn ($value) => $value ?: '-');
             $grid->column('wechat_url', '微信文章地址')->display(function ($value) {
@@ -119,8 +119,12 @@ class WechatArticleController extends AdminController
             $show->field('article_title', '文章标题')->as(function () use ($record) {
                 return $record->article->title ?? ('文章不存在或已被删除（ID：'.$record->article_id.'）');
             });
-            $show->field('sync_status', '同步状态')->using(WechatSyncStatus::options());
-            $show->field('publish_status', '发布状态')->using(WechatPublishStatus::options());
+            $show->field('sync_status', '同步状态')->as(function ($value) {
+                return WechatArticleController::enumLabel($value, WechatSyncStatus::class);
+            });
+            $show->field('publish_status', '发布状态')->as(function ($value) {
+                return WechatArticleController::enumLabel($value, WechatPublishStatus::class);
+            });
             $show->field('wechat_media_id', '微信素材 ID')->as(fn ($value) => $value ?: '-');
             $show->field('wechat_article_id', '微信文章 ID')->as(fn ($value) => $value ?: '-');
             $show->field('wechat_url', '微信文章地址')->as(function ($value) {

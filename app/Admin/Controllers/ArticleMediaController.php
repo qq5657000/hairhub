@@ -2,6 +2,7 @@
 
 namespace App\Admin\Controllers;
 
+use App\Admin\Controllers\Concerns\FormatsEnumBadges;
 use App\Enums\Article\ArticleMediaType;
 use App\Enums\Media\MediaStatus;
 use App\Models\Article;
@@ -44,6 +45,8 @@ use Illuminate\Validation\ValidationException;
  */
 class ArticleMediaController extends AdminController
 {
+    use FormatsEnumBadges;
+
     private ArticleMediaService $service;
 
     public function __construct(ArticleMediaService $service)
@@ -80,7 +83,9 @@ class ArticleMediaController extends AdminController
             $grid->column('preview', '预览')->display(function () {
                 return ArticleMediaController::renderPreviewFor($this);
             });
-            $grid->column('media_type', '用途')->using(ArticleMediaType::options());
+            $grid->column('media_type', '用途')->display(function ($value) {
+                return ArticleMediaController::enumLabel($value, ArticleMediaType::class);
+            });
             $grid->column('alt_text', 'ALT 文本');
             $grid->column('caption', '说明');
             $grid->column('sort', '排序')->sortable();
@@ -126,7 +131,9 @@ class ArticleMediaController extends AdminController
                     ? sprintf('#%d %s', $relation->media->id, $relation->media->original_name ?: $relation->media->filename)
                     : '-';
             });
-            $show->field('media_type', '用途')->using(ArticleMediaType::options());
+            $show->field('media_type', '用途')->as(function ($value) {
+                return ArticleMediaController::enumLabel($value, ArticleMediaType::class);
+            });
             $show->field('alt_text', 'ALT 文本');
             $show->field('caption', '说明');
             $show->field('sort', '排序值');
